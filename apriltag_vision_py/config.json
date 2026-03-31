@@ -1,0 +1,13 @@
+{
+  "camera_index": 0,
+  "width": 1280,
+  "height": 720,
+  "fps": 120,
+  "tag_family": "tag36h11",
+  "tag_size_m": 0.165,
+  "min_decision_margin": 30.0,
+  "draw_debug": true,
+  "publish_nt": true,
+  "team_number": 4145,
+  "nt_table": "/Vision/AprilTag"
+}
