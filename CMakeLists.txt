@@ -7,107 +7,95 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(ENABLE_NETWORKTABLES "Enable NetworkTables publishing (ntcore/wpiutil)" ON)
 
-# ---------------- OpenCV ----------------
-# Jetson apt installs generally expose classic OpenCV package first.
-find_package(OpenCV QUIET COMPONENTS core imgproc videoio highgui calib3d)
-if(OpenCV_FOUND)
-    message(STATUS "Found OpenCV (system): ${OpenCV_VERSION}")
-    set(OPENCV_LIBS opencv_core opencv_imgproc opencv_videoio opencv_highgui opencv_calib3d)
-else()
-    # Fallback for vcpkg-style config package naming
-    find_package(opencv4 CONFIG REQUIRED)
-    message(STATUS "Found opencv4 (config)")
-    set(OPENCV_LIBS opencv_core opencv_imgproc opencv_videoio opencv_highgui opencv_calib3d)
-endif()
+# OpenCV
+find_package(OpenCV REQUIRED COMPONENTS core imgproc videoio highgui calib3d)
+set(OPENCV_LIBS opencv_core opencv_imgproc opencv_videoio opencv_highgui opencv_calib3d)
 
-# ---------------- CUDA (optional) ----------------
-find_package(CUDAToolkit QUIET)
-if(CUDAToolkit_FOUND)
-    message(STATUS "CUDA toolkit found: ${CUDAToolkit_VERSION}")
-    add_compile_definitions(HAVE_CUDA=1)
-else()
-    message(STATUS "CUDA toolkit not found; CPU path will be used")
-    add_compile_definitions(HAVE_CUDA=0)
-endif()
-
-# ---------------- nlohmann/json ----------------
+# nlohmann/json
 find_package(nlohmann_json CONFIG QUIET)
 if(NOT nlohmann_json_FOUND)
-    include(FetchContent)
-    FetchContent_Declare(
-        nlohmann_json
-        GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG v3.11.3
-    )
-    FetchContent_MakeAvailable(nlohmann_json)
+  include(FetchContent)
+  FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+  )
+  FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
-# ---------------- apriltag ----------------
+# apriltag (robust)
+set(HAVE_APRILTAG_TARGET 0)
 find_package(apriltag CONFIG QUIET)
-if(NOT apriltag_FOUND)
+
+if(apriltag_FOUND)
+  message(STATUS "apriltag config found")
+  if(TARGET apriltag::apriltag)
+    set(HAVE_APRILTAG_TARGET 1)
+    message(STATUS "Using target apriltag::apriltag")
+  elseif(TARGET apriltag)
+    set(HAVE_APRILTAG_TARGET 2)
+    message(STATUS "Using target apriltag")
+  else()
+    message(STATUS "apriltag config found but no imported target; trying pkg-config")
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(APRILTAG REQUIRED apriltag)
+  endif()
+else()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(APRILTAG REQUIRED apriltag)
 endif()
 
-# ---------------- NetworkTables (optional) ----------------
+# NetworkTables optional
 set(HAVE_NTCORE 0)
 if(ENABLE_NETWORKTABLES)
-    find_package(ntcore CONFIG QUIET)
-    find_package(wpiutil CONFIG QUIET)
-
-    if(ntcore_FOUND AND wpiutil_FOUND)
-        message(STATUS "Found ntcore + wpiutil: NT publishing enabled")
-        set(HAVE_NTCORE 1)
-    else()
-        message(WARNING "ntcore/wpiutil not found; NT publishing disabled")
-    endif()
+  find_package(ntcore CONFIG QUIET)
+  find_package(wpiutil CONFIG QUIET)
+  if(ntcore_FOUND AND wpiutil_FOUND)
+    set(HAVE_NTCORE 1)
+    message(STATUS "NTCore enabled")
+  else()
+    message(WARNING "ntcore/wpiutil not found; NT disabled")
+  endif()
 endif()
 
 add_executable(apriltag_vision
-    src/main.cpp
-    src/calibration.cpp
-    src/detector.cpp
-    src/pose.cpp
-    src/visualize.cpp
-    src/publisher.cpp
+  src/main.cpp
+  src/calibration.cpp
+  src/detector.cpp
+  src/pose.cpp
+  src/visualize.cpp
+  src/publisher.cpp
 )
 
-target_include_directories(apriltag_vision PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-
-if(NOT apriltag_FOUND)
-    target_include_directories(apriltag_vision PRIVATE ${APRILTAG_INCLUDE_DIRS})
-    target_link_directories(apriltag_vision PRIVATE ${APRILTAG_LIBRARY_DIRS})
-endif()
-
+target_include_directories(apriltag_vision PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(apriltag_vision PRIVATE HAVE_NTCORE=${HAVE_NTCORE})
 
 target_link_libraries(apriltag_vision PRIVATE
-    ${OPENCV_LIBS}
-    nlohmann_json::nlohmann_json
+  ${OPENCV_LIBS}
+  nlohmann_json::nlohmann_json
 )
 
-if(apriltag_FOUND)
-    target_link_libraries(apriltag_vision PRIVATE apriltag::apriltag)
+if(HAVE_APRILTAG_TARGET EQUAL 1)
+  target_link_libraries(apriltag_vision PRIVATE apriltag::apriltag)
+elseif(HAVE_APRILTAG_TARGET EQUAL 2)
+  target_link_libraries(apriltag_vision PRIVATE apriltag)
 else()
-    target_link_libraries(apriltag_vision PRIVATE ${APRILTAG_LIBRARIES})
-    target_compile_options(apriltag_vision PRIVATE ${APRILTAG_CFLAGS_OTHER})
+  target_include_directories(apriltag_vision PRIVATE ${APRILTAG_INCLUDE_DIRS})
+  target_link_directories(apriltag_vision PRIVATE ${APRILTAG_LIBRARY_DIRS})
+  target_link_libraries(apriltag_vision PRIVATE ${APRILTAG_LIBRARIES})
+  target_compile_options(apriltag_vision PRIVATE ${APRILTAG_CFLAGS_OTHER})
 endif()
 
 if(HAVE_NTCORE)
-    set(NTCORE_TARGET ntcore)
-    if(TARGET ntcore::ntcore)
-        set(NTCORE_TARGET ntcore::ntcore)
-    endif()
+  if(TARGET ntcore::ntcore)
+    target_link_libraries(apriltag_vision PRIVATE ntcore::ntcore)
+  else()
+    target_link_libraries(apriltag_vision PRIVATE ntcore)
+  endif()
 
-    set(WPIUTIL_TARGET wpiutil)
-    if(TARGET wpiutil::wpiutil)
-        set(WPIUTIL_TARGET wpiutil::wpiutil)
-    endif()
-
-    target_link_libraries(apriltag_vision PRIVATE
-        ${NTCORE_TARGET}
-        ${WPIUTIL_TARGET}
-    )
+  if(TARGET wpiutil::wpiutil)
+    target_link_libraries(apriltag_vision PRIVATE wpiutil::wpiutil)
+  else()
+    target_link_libraries(apriltag_vision PRIVATE wpiutil)
+  endif()
 endif()
