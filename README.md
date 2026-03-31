@@ -94,7 +94,11 @@ cmake -B build -S . -Dwpiutil_DIR=/path/to/wpiutil
 ## Usage
 
 ```bash
-./build/apriltag_vision --calibration calib.json [options]
+./build/apriltag_vision --calibration calibration.json --camera 0 --tag-size 0.165 --team 1086
+```
+#### For no GUI
+```bash
+./build/apriltag_vision --calibration calibration.json --camera 0 --tag-size 0.165 --team 1086 --no-display
 ```
 
 ### CLI flags
