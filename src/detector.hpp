@@ -1,28 +1,27 @@
 #pragma once
-
-#include "config.hpp"
-
-#include <apriltag.h>
-#include <opencv2/core.hpp>
-
 #include <vector>
+#include <memory>
+#include <opencv2/core.hpp>
+#include "types.hpp"
 
-class AprilTagDetector {
+extern "C" {
+#include <apriltag.h>
+#include <tag36h11.h>
+#include <apriltag_pose.h>
+}
+
+class AprilTagDetectorRAII {
 public:
-    explicit AprilTagDetector(const Config& config);
-    ~AprilTagDetector();
+  AprilTagDetectorRAII();
+  ~AprilTagDetectorRAII();
 
-    AprilTagDetector(const AprilTagDetector&) = delete;
-    AprilTagDetector& operator=(const AprilTagDetector&) = delete;
+  AprilTagDetectorRAII(const AprilTagDetectorRAII&) = delete;
+  AprilTagDetectorRAII& operator=(const AprilTagDetectorRAII&) = delete;
 
-    std::vector<apriltag_detection_t*> detect(const cv::Mat& gray_frame);
-    void freeDetections(zarray_t* detections);
-
-    zarray_t* lastRawDetections() const { return last_detections_; }
+  std::vector<apriltag_detection_t*> detect(const cv::Mat& gray) const;
+  apriltag_detector_t* rawDetector() const { return detector_; }
 
 private:
-    Config config_;
-    apriltag_family_t* family_;
-    apriltag_detector_t* detector_;
-    zarray_t* last_detections_;
+  apriltag_family_t* family_{nullptr};
+  apriltag_detector_t* detector_{nullptr};
 };
