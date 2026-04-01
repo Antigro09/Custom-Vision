@@ -1,25 +1,16 @@
 #pragma once
+#include <string>
 
-struct Config {
-    int nthreads;                    // Number of detector threads
-    float quad_decimate;             // Image decimation factor
-    float quad_sigma;                // Gaussian blur sigma
-    bool refine_edges;               // Edge refinement
-    float decode_sharpening;         // Decoding sharpening
-    double tag_size_meters;          // Physical tag size in meters
-    int camera_index;                // Camera index
-    double min_decision_margin;      // Minimum confidence threshold
+struct AppConfig {
+  int cameraIndex = 0;
+  int width = 1280;
+  int height = 720;
+  int fps = 60;
+  double tagSizeM = 0.165;
+  double minDecisionMargin = 30.0;
+  bool drawDebug = true;
+  int team = 1086;
+  std::string ntTable = "/Vision/AprilTag";
 };
 
-inline Config defaultConfig() {
-    return Config{
-        4,
-        2.0f,
-        0.0f,
-        true,
-        0.25f,
-        0.1651,
-        0,
-        50.0
-    };
-}
+AppConfig parseArgs(int argc, char** argv, std::string& calibrationPath);
