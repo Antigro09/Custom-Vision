@@ -1,6 +1,10 @@
 #pragma once
-
-#include <string>
 #include <opencv2/core.hpp>
+#include <string>
 
-void loadCalibration(const std::string& path, cv::Mat& camera_matrix, cv::Mat& dist_coeffs);
+struct Calibration {
+  cv::Mat cameraMatrix; // 3x3 CV_64F
+  cv::Mat distCoeffs;   // Nx1 CV_64F
+};
+
+Calibration loadCalibration(const std::string& path);
