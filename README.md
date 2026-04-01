@@ -70,8 +70,12 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/native-packages
 ## Build
 
 ```bash
-cmake -B build -S .
-cmake --build build -j
+rm -rf build
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=/usr/local \
+  -DENABLE_NETWORKTABLES=ON
+cmake --build build -j$(nproc)
 ```
 
 If CMake cannot find one or more native packages, configure with one of:
