@@ -15,7 +15,6 @@
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <utility>
 #include <vector>
 
 struct PublisherOptions {
@@ -23,6 +22,10 @@ struct PublisherOptions {
     std::optional<unsigned int> team_number;
     std::optional<std::string> server;
     bool use_stdout_json = false;
+    bool field_layout_loaded = false;
+    int field_layout_tag_count = 0;
+    std::optional<double> field_length_m;
+    std::optional<double> field_width_m;
 };
 
 class Publisher {
@@ -36,7 +39,8 @@ public:
         std::int64_t timestamp_us,
         double latency_ms,
         double fps,
-        const std::vector<std::pair<apriltag_detection_t*, PoseResult>>& detections);
+        const std::vector<DetectionResult>& detections,
+        const std::optional<FieldPoseResult>& field_pose);
 
 private:
     void emitStdoutJson(
@@ -45,10 +49,15 @@ private:
         std::int64_t timestamp_us,
         double latency_ms,
         double fps,
-        const std::vector<std::pair<apriltag_detection_t*, PoseResult>>& detections) const;
+        const std::vector<DetectionResult>& detections,
+        const std::optional<FieldPoseResult>& field_pose) const;
 
     std::string base_topic_;
     bool use_stdout_json_;
+    bool field_layout_loaded_;
+    int field_layout_tag_count_;
+    std::optional<double> field_length_m_;
+    std::optional<double> field_width_m_;
 #if HAVE_NTCORE
     nt::NetworkTableInstance nt_instance_;
     nt::BooleanPublisher connected_pub_;
@@ -65,5 +74,20 @@ private:
     nt::DoubleArrayPublisher rotations_rvec_rad_pub_;
     nt::DoubleArrayPublisher euler_deg_pub_;
     nt::DoubleArrayPublisher distances_m_pub_;
+    nt::DoubleArrayPublisher pose_ambiguities_pub_;
+    nt::DoubleArrayPublisher reprojection_errors_px_pub_;
+    nt::BooleanPublisher field_layout_loaded_pub_;
+    nt::IntegerPublisher field_layout_tag_count_pub_;
+    nt::DoublePublisher field_length_m_pub_;
+    nt::DoublePublisher field_width_m_pub_;
+    nt::BooleanPublisher field_pose_valid_pub_;
+    nt::BooleanPublisher field_pose_is_multitag_pub_;
+    nt::IntegerPublisher field_pose_used_tag_count_pub_;
+    nt::IntegerArrayPublisher field_pose_used_tag_ids_pub_;
+    nt::DoubleArrayPublisher field_pose_translation_m_pub_;
+    nt::DoubleArrayPublisher field_pose_quaternion_wxyz_pub_;
+    nt::DoubleArrayPublisher field_pose_euler_deg_pub_;
+    nt::DoublePublisher field_pose_reprojection_error_px_pub_;
+    nt::DoublePublisher field_pose_ambiguity_pub_;
 #endif
 };

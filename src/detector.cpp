@@ -1,24 +1,108 @@
 #include "detector.hpp"
 
+#include <tag16h5.h>
+#include <tag25h9.h>
 #include <tag36h11.h>
+#include <tag36h10.h>
+#include <tagCircle21h7.h>
+#include <tagCircle49h12.h>
+#include <tagCustom48h12.h>
+#include <tagStandard41h12.h>
+#include <tagStandard52h13.h>
 
+#include <algorithm>
+#include <cctype>
 #include <stdexcept>
+#include <string>
+
+namespace {
+std::string normalizeFamilyName(const std::string& family) {
+    std::string normalized = family;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return normalized;
+}
+
+apriltag_family_t* createFamily(const std::string& family_name) {
+    const std::string normalized = normalizeFamilyName(family_name);
+    if (normalized == "tag16h5" || normalized == "16h5") {
+        return tag16h5_create();
+    }
+    if (normalized == "tag25h9" || normalized == "25h9") {
+        return tag25h9_create();
+    }
+    if (normalized == "tag36h10" || normalized == "36h10") {
+        return tag36h10_create();
+    }
+    if (normalized == "tag36h11" || normalized == "36h11") {
+        return tag36h11_create();
+    }
+    if (normalized == "tagcircle21h7" || normalized == "circle21h7") {
+        return tagCircle21h7_create();
+    }
+    if (normalized == "tagcircle49h12" || normalized == "circle49h12") {
+        return tagCircle49h12_create();
+    }
+    if (normalized == "tagcustom48h12" || normalized == "custom48h12") {
+        return tagCustom48h12_create();
+    }
+    if (normalized == "tagstandard41h12" || normalized == "standard41h12") {
+        return tagStandard41h12_create();
+    }
+    if (normalized == "tagstandard52h13" || normalized == "standard52h13") {
+        return tagStandard52h13_create();
+    }
+
+    throw std::runtime_error(
+        "Unsupported AprilTag family: " + family_name +
+        ". Supported families: tag16h5, tag25h9, tag36h10, tag36h11, "
+        "tagCircle21h7, tagCircle49h12, tagCustom48h12, tagStandard41h12, tagStandard52h13");
+}
+
+void destroyFamily(const std::string& family_name, apriltag_family_t* family) {
+    if (!family) {
+        return;
+    }
+
+    const std::string normalized = normalizeFamilyName(family_name);
+    if (normalized == "tag16h5" || normalized == "16h5") {
+        tag16h5_destroy(family);
+    } else if (normalized == "tag25h9" || normalized == "25h9") {
+        tag25h9_destroy(family);
+    } else if (normalized == "tag36h10" || normalized == "36h10") {
+        tag36h10_destroy(family);
+    } else if (normalized == "tag36h11" || normalized == "36h11") {
+        tag36h11_destroy(family);
+    } else if (normalized == "tagcircle21h7" || normalized == "circle21h7") {
+        tagCircle21h7_destroy(family);
+    } else if (normalized == "tagcircle49h12" || normalized == "circle49h12") {
+        tagCircle49h12_destroy(family);
+    } else if (normalized == "tagcustom48h12" || normalized == "custom48h12") {
+        tagCustom48h12_destroy(family);
+    } else if (normalized == "tagstandard41h12" || normalized == "standard41h12") {
+        tagStandard41h12_destroy(family);
+    } else if (normalized == "tagstandard52h13" || normalized == "standard52h13") {
+        tagStandard52h13_destroy(family);
+    }
+}
+} // namespace
 
 AprilTagDetector::AprilTagDetector(const Config& config)
     : config_(config), family_(nullptr), detector_(nullptr), last_detections_(nullptr) {
-    family_ = tag36h11_create();
+    family_ = createFamily(config_.tag_family);
     if (!family_) {
-        throw std::runtime_error("Failed to create tag36h11 family");
+        throw std::runtime_error("Failed to create AprilTag family: " + config_.tag_family);
     }
 
     detector_ = apriltag_detector_create();
     if (!detector_) {
-        tag36h11_destroy(family_);
+        destroyFamily(config_.tag_family, family_);
         family_ = nullptr;
         throw std::runtime_error("Failed to create apriltag detector");
     }
 
-    apriltag_detector_add_family(detector_, family_);
+    apriltag_detector_add_family_bits(detector_, family_, config_.max_error_bits);
     detector_->nthreads = config_.nthreads;
     detector_->quad_decimate = config_.quad_decimate;
     detector_->quad_sigma = config_.quad_sigma;
@@ -36,7 +120,7 @@ AprilTagDetector::~AprilTagDetector() {
         detector_ = nullptr;
     }
     if (family_) {
-        tag36h11_destroy(family_);
+        destroyFamily(config_.tag_family, family_);
         family_ = nullptr;
     }
 }
