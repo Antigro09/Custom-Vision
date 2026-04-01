@@ -1,83 +1,62 @@
 #include "pose.hpp"
-
 #include <opencv2/calib3d.hpp>
-
+#include <opencv2/core.hpp>
 #include <cmath>
-#include <stdexcept>
-#include <vector>
 
-PoseResult estimatePose(
-    const apriltag_detection_t* detection,
-    const cv::Mat& camera_matrix,
-    const cv::Mat& dist_coeffs,
-    double tag_size_meters) {
-    if (!detection) {
-        throw std::runtime_error("estimatePose received null detection");
-    }
+static std::array<double,3> eulerFromRvec(const cv::Mat& rvec) {
+  cv::Mat R;
+  cv::Rodrigues(rvec, R);
+  double sy = std::sqrt(R.at<double>(0,0)*R.at<double>(0,0) + R.at<double>(1,0)*R.at<double>(1,0));
+  bool singular = sy < 1e-6;
 
-    const double s = tag_size_meters / 2.0;
+  double x, y, z;
+  if (!singular) {
+    x = std::atan2(R.at<double>(2,1), R.at<double>(2,2));
+    y = std::atan2(-R.at<double>(2,0), sy);
+    z = std::atan2(R.at<double>(1,0), R.at<double>(0,0));
+  } else {
+    x = std::atan2(-R.at<double>(1,2), R.at<double>(1,1));
+    y = std::atan2(-R.at<double>(2,0), sy);
+    z = 0.0;
+  }
 
-    // AprilTag corners are bottom-left first and wrap counter-clockwise.
-    // SOLVEPNP_IPPE_SQUARE expects the square points in this corresponding order.
-    const std::vector<cv::Point3f> object_points = {
-        {-static_cast<float>(s),  static_cast<float>(s), 0.0f},
-        { static_cast<float>(s),  static_cast<float>(s), 0.0f},
-        { static_cast<float>(s), -static_cast<float>(s), 0.0f},
-        {-static_cast<float>(s), -static_cast<float>(s), 0.0f}
-    };
+  constexpr double k = 180.0 / M_PI;
+  return {x*k, y*k, z*k};
+}
 
-    std::vector<cv::Point2f> image_points;
-    image_points.reserve(4);
-    for (int i = 0; i < 4; ++i) {
-        image_points.emplace_back(
-            static_cast<float>(detection->p[i][0]),
-            static_cast<float>(detection->p[i][1]));
-    }
+std::optional<DetectionResult> estimatePoseFromDetection(
+  const apriltag_detection_t* det,
+  const Calibration& calib,
+  double tagSizeM
+) {
+  if (!det) return std::nullopt;
 
-    cv::Vec3d rvec, tvec;
-    const bool ok = cv::solvePnP(
-        object_points,
-        image_points,
-        camera_matrix,
-        dist_coeffs,
-        rvec,
-        tvec,
-        false,
-        cv::SOLVEPNP_IPPE_SQUARE);
+  const double s = tagSizeM / 2.0;
+  std::vector<cv::Point3d> obj = {
+    {-s,-s,0}, {s,-s,0}, {s,s,0}, {-s,s,0}
+  };
 
-    if (!ok) {
-        throw std::runtime_error("cv::solvePnP failed for detection id=" + std::to_string(detection->id));
-    }
+  std::vector<cv::Point2d> img = {
+    {det->p[0][0], det->p[0][1]},
+    {det->p[1][0], det->p[1][1]},
+    {det->p[2][0], det->p[2][1]},
+    {det->p[3][0], det->p[3][1]}
+  };
 
-    cv::Mat R;
-    cv::Rodrigues(rvec, R);
+  cv::Mat rvec, tvec;
+  bool ok = cv::solvePnP(obj, img, calib.cameraMatrix, calib.distCoeffs, rvec, tvec, false, cv::SOLVEPNP_ITERATIVE);
+  if (!ok) return std::nullopt;
 
-    // ZYX yaw-pitch-roll extraction
-    const double sy = std::sqrt(R.at<double>(0, 0) * R.at<double>(0, 0) +
-                                R.at<double>(1, 0) * R.at<double>(1, 0));
-    const bool singular = sy < 1e-6;
-
-    double roll, pitch, yaw;
-    if (!singular) {
-        roll  = std::atan2(R.at<double>(2, 1), R.at<double>(2, 2));
-        pitch = std::atan2(-R.at<double>(2, 0), sy);
-        yaw   = std::atan2(R.at<double>(1, 0), R.at<double>(0, 0));
-    } else {
-        roll  = std::atan2(-R.at<double>(1, 2), R.at<double>(1, 1));
-        pitch = std::atan2(-R.at<double>(2, 0), sy);
-        yaw   = 0.0;
-    }
-
-    constexpr double kPi = 3.14159265358979323846;
-    constexpr double kRadToDeg = 180.0 / kPi;
-
-    PoseResult result;
-    result.tvec = tvec;
-    result.rvec = rvec;
-    result.rotation_matrix = R;
-    result.roll_deg = roll * kRadToDeg;
-    result.pitch_deg = pitch * kRadToDeg;
-    result.yaw_deg = yaw * kRadToDeg;
-    result.distance_m = cv::norm(tvec);
-    return result;
+  DetectionResult r;
+  r.id = det->id;
+  r.decisionMargin = det->decision_margin;
+  r.center = {det->c[0], det->c[1]};
+  for (int i=0;i<4;++i) r.corners[i] = {det->p[i][0], det->p[i][1]};
+  for (int i=0;i<3;++i) {
+    r.rvec[i] = rvec.at<double>(i,0);
+    r.tvec[i] = tvec.at<double>(i,0);
+  }
+  r.eulerDeg = eulerFromRvec(rvec);
+  r.distanceM = std::sqrt(r.tvec[0]*r.tvec[0] + r.tvec[1]*r.tvec[1] + r.tvec[2]*r.tvec[2]);
+  return r;
 }
