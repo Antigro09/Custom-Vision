@@ -120,6 +120,7 @@ cmake -B build -S . -Dwpiutil_DIR=/path/to/wpiutil
 - `--width <int>` requested camera input width
 - `--height <int>` requested camera input height
 - `--fps <int>` requested camera input FPS
+- `--camera-backend <auto|v4l2|gstreamer>` force camera backend selection (`v4l2` is often best on Jetson for explicit mode control)
 - `--family <name>` AprilTag family. Supported: `tag16h5`, `tag25h9`, `tag36h10`, `tag36h11`, `tagCircle21h7`, `tagCircle49h12`, `tagCustom48h12`, `tagStandard41h12`, `tagStandard52h13`
 - `--threads <int>` AprilTag detector thread count
 - `--quad-decimate <float>` AprilTag detector quad decimation
@@ -204,6 +205,7 @@ Internally, OpenCV pose estimation still runs in OpenCV's native camera frame fo
 ./build/apriltag_vision --calibration calib.json --field-layout frc-field.json --team 6328
 ./build/apriltag_vision --calibration calib.json --stdout-json --record output.mp4
 ./build/apriltag_vision --calibration calib.json --auto-exposure off --exposure -6 --brightness 128 --auto-white-balance off --white-balance 4200 --orientation cw90 --stream-width 640 --stream-height 360
+./build/apriltag_vision --calibration calib.json --camera 0 --camera-backend v4l2 --width 1280 --height 720 --fps 100 --team 1086
 ```
 
 ## Calibration JSON format

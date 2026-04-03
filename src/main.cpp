@@ -53,6 +53,12 @@ enum class OutputOrientation {
     Rotate90CounterClockwise
 };
 
+enum class CameraBackend {
+    Auto,
+    V4L2,
+    GStreamer
+};
+
 void onSigInt(int) {
     g_stop.store(true);
 }
@@ -87,6 +93,7 @@ struct CliOptions {
     std::optional<int> stream_width;
     std::optional<int> stream_height;
     std::optional<std::string> field_layout_path;
+    CameraBackend camera_backend = CameraBackend::Auto;
 };
 
 int parseInteger(const std::string& value, const std::string& flag) {
@@ -209,6 +216,53 @@ int defaultMaxErrorBitsForFamily(const std::string& family) {
 }
 
 OutputOrientation parseOrientation(const std::string& value) {
+
+    CameraBackend parseCameraBackend(const std::string& value) {
+        const std::string lowered = toLower(value);
+        if (lowered == "auto") {
+            return CameraBackend::Auto;
+        }
+        if (lowered == "v4l2") {
+            return CameraBackend::V4L2;
+        }
+        if (lowered == "gstreamer" || lowered == "gst") {
+            return CameraBackend::GStreamer;
+        }
+
+        throw std::runtime_error(
+            "Invalid value for --camera-backend: " + value +
+            " (expected auto, v4l2, or gstreamer)");
+    }
+
+    const char* cameraBackendName(CameraBackend backend) {
+        switch (backend) {
+            case CameraBackend::Auto:
+                return "auto";
+            case CameraBackend::V4L2:
+                return "v4l2";
+            case CameraBackend::GStreamer:
+                return "gstreamer";
+        }
+        return "auto";
+    }
+
+    cv::VideoCapture openCamera(int camera_index, CameraBackend backend) {
+        cv::VideoCapture cap;
+
+        switch (backend) {
+            case CameraBackend::Auto:
+                cap.open(camera_index);
+                break;
+            case CameraBackend::V4L2:
+                cap.open(camera_index, cv::CAP_V4L2);
+                break;
+            case CameraBackend::GStreamer:
+                cap.open(camera_index, cv::CAP_GSTREAMER);
+                break;
+        }
+
+        return cap;
+    }
     const std::string lowered = toLower(value);
     if (lowered == "normal" || lowered == "0") {
         return OutputOrientation::Normal;
@@ -460,6 +514,8 @@ CliOptions parseArgs(int argc, char** argv) {
             opts.stream_height = parsePositiveInt(requireValue("--stream-height"), "--stream-height");
         } else if (arg == "--field-layout") {
             opts.field_layout_path = requireValue("--field-layout");
+        } else if (arg == "--camera-backend") {
+            opts.camera_backend = parseCameraBackend(requireValue("--camera-backend"));
         } else {
             throw std::runtime_error("Unknown argument: " + arg);
         }
@@ -560,8 +616,10 @@ int main(int argc, char** argv) {
         }
 
         cv::VideoCapture cap(config.camera_index);
+        cv::VideoCapture cap = openCamera(config.camera_index, cli.camera_backend);
         if (!cap.isOpened()) {
-            std::cerr << "Failed to open camera index " << config.camera_index << '\n';
+            std::cerr << "Failed to open camera index " << config.camera_index
+                      << " with backend " << cameraBackendName(cli.camera_backend) << '\n';
             return 1;
         }
 
@@ -584,6 +642,7 @@ int main(int argc, char** argv) {
             std::cerr << " @ " << actual_fps << " FPS";
         }
         std::cerr << '\n';
+        std::cerr << "Camera backend: " << cameraBackendName(cli.camera_backend) << '\n';
         std::cerr << "AprilTag family: " << config.tag_family << '\n';
         std::cerr << "AprilTag tuning: decimate=" << config.quad_decimate
                   << ", blur=" << config.quad_sigma
@@ -748,6 +807,7 @@ int main(int argc, char** argv) {
             << "Usage: apriltag_vision --calibration <path> [--camera <int>] [--tag-size <meters>] "
                "[--camera-name <name>] [--team <number> | --nt-server <host>] [--width <px>] "
                "[--height <px>] [--fps <fps>] [--family <tag36h11>] [--threads <count>] "
+               "[--camera-backend <auto|v4l2|gstreamer>] "
                "[--quad-decimate <value>] [--blur <sigma>] [--refine-edges <on|off>] "
                "[--pose-iterations <0-100>] [--max-error-bits <count>] "
                "[--decision-margin-cutoff <value>] [--auto-exposure <on|off>] "
