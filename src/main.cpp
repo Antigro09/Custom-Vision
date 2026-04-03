@@ -216,53 +216,6 @@ int defaultMaxErrorBitsForFamily(const std::string& family) {
 }
 
 OutputOrientation parseOrientation(const std::string& value) {
-
-    CameraBackend parseCameraBackend(const std::string& value) {
-        const std::string lowered = toLower(value);
-        if (lowered == "auto") {
-            return CameraBackend::Auto;
-        }
-        if (lowered == "v4l2") {
-            return CameraBackend::V4L2;
-        }
-        if (lowered == "gstreamer" || lowered == "gst") {
-            return CameraBackend::GStreamer;
-        }
-
-        throw std::runtime_error(
-            "Invalid value for --camera-backend: " + value +
-            " (expected auto, v4l2, or gstreamer)");
-    }
-
-    const char* cameraBackendName(CameraBackend backend) {
-        switch (backend) {
-            case CameraBackend::Auto:
-                return "auto";
-            case CameraBackend::V4L2:
-                return "v4l2";
-            case CameraBackend::GStreamer:
-                return "gstreamer";
-        }
-        return "auto";
-    }
-
-    cv::VideoCapture openCamera(int camera_index, CameraBackend backend) {
-        cv::VideoCapture cap;
-
-        switch (backend) {
-            case CameraBackend::Auto:
-                cap.open(camera_index);
-                break;
-            case CameraBackend::V4L2:
-                cap.open(camera_index, cv::CAP_V4L2);
-                break;
-            case CameraBackend::GStreamer:
-                cap.open(camera_index, cv::CAP_GSTREAMER);
-                break;
-        }
-
-        return cap;
-    }
     const std::string lowered = toLower(value);
     if (lowered == "normal" || lowered == "0") {
         return OutputOrientation::Normal;
@@ -280,6 +233,53 @@ OutputOrientation parseOrientation(const std::string& value) {
     throw std::runtime_error(
         "Invalid value for --orientation: " + value +
         " (expected normal, cw90, 180, or ccw90)");
+}
+
+CameraBackend parseCameraBackend(const std::string& value) {
+    const std::string lowered = toLower(value);
+    if (lowered == "auto") {
+        return CameraBackend::Auto;
+    }
+    if (lowered == "v4l2") {
+        return CameraBackend::V4L2;
+    }
+    if (lowered == "gstreamer" || lowered == "gst") {
+        return CameraBackend::GStreamer;
+    }
+
+    throw std::runtime_error(
+        "Invalid value for --camera-backend: " + value +
+        " (expected auto, v4l2, or gstreamer)");
+}
+
+const char* cameraBackendName(CameraBackend backend) {
+    switch (backend) {
+        case CameraBackend::Auto:
+            return "auto";
+        case CameraBackend::V4L2:
+            return "v4l2";
+        case CameraBackend::GStreamer:
+            return "gstreamer";
+    }
+    return "auto";
+}
+
+cv::VideoCapture openCamera(int camera_index, CameraBackend backend) {
+    cv::VideoCapture cap;
+
+    switch (backend) {
+        case CameraBackend::Auto:
+            cap.open(camera_index);
+            break;
+        case CameraBackend::V4L2:
+            cap.open(camera_index, cv::CAP_V4L2);
+            break;
+        case CameraBackend::GStreamer:
+            cap.open(camera_index, cv::CAP_GSTREAMER);
+            break;
+    }
+
+    return cap;
 }
 
 std::string orientationName(OutputOrientation orientation) {
@@ -615,7 +615,6 @@ int main(int argc, char** argv) {
             }
         }
 
-        cv::VideoCapture cap(config.camera_index);
         cv::VideoCapture cap = openCamera(config.camera_index, cli.camera_backend);
         if (!cap.isOpened()) {
             std::cerr << "Failed to open camera index " << config.camera_index
