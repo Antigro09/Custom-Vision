@@ -1,9 +1,9 @@
 #include "detector.hpp"
 
-#include <tag16h5.h>
+#include <apriltag/tag16h5.h>
 #include <apriltag/tag25h9.h>
-#include <tag36h11.h>
-#include <tag36h10.h>
+#include <apriltag/tag36h11.h>
+#include <apriltag/tag36h10.h>
 #include <tagCircle21h7.h>
 #include <tagCircle49h12.h>
 #include <tagCustom48h12.h>
