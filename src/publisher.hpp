@@ -2,7 +2,7 @@
 
 #include "pose.hpp"
 
-#include <apriltag.h>
+#include <apriltag/apriltag.h>
 #if HAVE_NTCORE
 #include <networktables/BooleanTopic.h>
 #include <networktables/DoubleArrayTopic.h>

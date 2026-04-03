@@ -2,7 +2,7 @@
 
 #include "field_layout.hpp"
 
-#include <apriltag.h>
+#include <apriltag/apriltag.h>
 #include <opencv2/core.hpp>
 
 #include <optional>
