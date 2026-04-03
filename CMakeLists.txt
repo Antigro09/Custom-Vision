@@ -7,7 +7,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(OpenCV REQUIRED COMPONENTS core imgproc videoio highgui calib3d)
 find_package(apriltag REQUIRED)
-target_link_libraries(apriltag_vision PRIVATE apriltag::apriltag)
 find_package(nlohmann_json CONFIG QUIET)
 
 option(ENABLE_NETWORKTABLES "Enable NetworkTables publishing" ON)
