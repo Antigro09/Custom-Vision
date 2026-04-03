@@ -6,8 +6,33 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(OpenCV REQUIRED COMPONENTS core imgproc videoio highgui calib3d)
-find_package(apriltag REQUIRED)
 find_package(nlohmann_json CONFIG QUIET)
+
+# Prefer a single apriltag install root to avoid mixing headers from
+# /usr/local/include and /usr/include in the same translation unit.
+set(APRILTAG_INCLUDE_DIR "")
+set(APRILTAG_LIBRARY "")
+foreach(APRILTAG_PREFIX /usr /usr/local)
+    if(EXISTS "${APRILTAG_PREFIX}/include/apriltag/apriltag.h")
+        find_library(APRILTAG_LIBRARY_CANDIDATE
+            NAMES apriltag
+            PATHS
+                "${APRILTAG_PREFIX}/lib"
+                "${APRILTAG_PREFIX}/lib/aarch64-linux-gnu"
+                "${APRILTAG_PREFIX}/lib/x86_64-linux-gnu"
+            NO_DEFAULT_PATH
+        )
+        if(APRILTAG_LIBRARY_CANDIDATE)
+            set(APRILTAG_INCLUDE_DIR "${APRILTAG_PREFIX}/include")
+            set(APRILTAG_LIBRARY "${APRILTAG_LIBRARY_CANDIDATE}")
+            break()
+        endif()
+    endif()
+endforeach()
+
+if(NOT APRILTAG_LIBRARY)
+    find_package(apriltag REQUIRED)
+endif()
 
 option(ENABLE_NETWORKTABLES "Enable NetworkTables publishing" ON)
 
@@ -42,6 +67,10 @@ add_executable(apriltag_vision
     src/publisher.cpp
 )
 
+if(APRILTAG_INCLUDE_DIR)
+    target_include_directories(apriltag_vision BEFORE PRIVATE "${APRILTAG_INCLUDE_DIR}")
+endif()
+
 target_compile_definitions(apriltag_vision PRIVATE HAVE_NTCORE=${HAVE_NTCORE})
 if(WIN32)
     target_compile_definitions(apriltag_vision PRIVATE NOMINMAX)
@@ -57,7 +86,8 @@ target_link_libraries(apriltag_vision PRIVATE
     opencv_highgui
     opencv_calib3d
     ${OPENCV_CUDA_LIBS}
-    apriltag
+    $<$<BOOL:${APRILTAG_LIBRARY}>:${APRILTAG_LIBRARY}>
+    $<$<NOT:$<BOOL:${APRILTAG_LIBRARY}>>:apriltag>
     nlohmann_json::nlohmann_json
 )
 
