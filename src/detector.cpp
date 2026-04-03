@@ -1,19 +1,38 @@
 #include "detector.hpp"
 
-#include <apriltag/tag16h5.h>
-#include <apriltag/tag25h9.h>
-#include <apriltag/tag36h11.h>
-#include <apriltag/tag36h10.h>
-#include <apriltag/tagCircle21h7.h>
-#include <apriltag/tagCircle49h12.h>
-#include <apriltag/tagCustom48h12.h>
-#include <apriltag/tagStandard41h12.h>
-#include <apriltag/tagStandard52h13.h>
-
 #include <algorithm>
 #include <cctype>
 #include <stdexcept>
 #include <string>
+
+extern "C" {
+apriltag_family_t* tag16h5_create();
+void tag16h5_destroy(apriltag_family_t*);
+
+apriltag_family_t* tag25h9_create();
+void tag25h9_destroy(apriltag_family_t*);
+
+apriltag_family_t* tag36h10_create();
+void tag36h10_destroy(apriltag_family_t*);
+
+apriltag_family_t* tag36h11_create();
+void tag36h11_destroy(apriltag_family_t*);
+
+apriltag_family_t* tagCircle21h7_create();
+void tagCircle21h7_destroy(apriltag_family_t*);
+
+apriltag_family_t* tagCircle49h12_create();
+void tagCircle49h12_destroy(apriltag_family_t*);
+
+apriltag_family_t* tagCustom48h12_create();
+void tagCustom48h12_destroy(apriltag_family_t*);
+
+apriltag_family_t* tagStandard41h12_create();
+void tagStandard41h12_destroy(apriltag_family_t*);
+
+apriltag_family_t* tagStandard52h13_create();
+void tagStandard52h13_destroy(apriltag_family_t*);
+}
 
 namespace {
 std::string normalizeFamilyName(const std::string& family) {
