@@ -8,6 +8,7 @@
 #include "config.hpp"
 #include "detector.hpp"
 #include "field_layout.hpp"
+#include "persistent_config.hpp"
 #include "pose.hpp"
 #include "publisher.hpp"
 #include "visualize.hpp"
@@ -64,18 +65,22 @@ void onSigInt(int) {
 }
 
 struct CliOptions {
-    int camera_index = 0;
+    std::optional<int> camera_index;
     double tag_size_meters = 0.1651;
-    std::string calibration_path;
-    std::string camera_name = "camera0";
+    std::optional<std::string> calibration_path;
+    std::optional<std::string> camera_name;
     bool no_display = false;
     bool stdout_json = false;
     std::optional<std::string> record_path;
     std::optional<unsigned int> team_number;
     std::optional<std::string> nt_server;
+    std::optional<std::string> profile_path;
+    std::optional<int> camera_slot;
+    bool no_persistent_profile = false;
     std::optional<int> width;
     std::optional<int> height;
     std::optional<int> fps;
+    std::optional<std::string> pixel_format;
     std::optional<int> threads;
     std::optional<float> quad_decimate;
     std::optional<float> quad_sigma;
@@ -87,13 +92,17 @@ struct CliOptions {
     std::optional<bool> auto_exposure;
     std::optional<double> exposure;
     std::optional<double> brightness;
+    std::optional<double> gain;
+    std::optional<double> red_awb_gain;
+    std::optional<double> blue_awb_gain;
     std::optional<bool> auto_white_balance;
     std::optional<double> white_balance;
+    std::optional<bool> low_latency_mode;
     std::optional<OutputOrientation> orientation;
     std::optional<int> stream_width;
     std::optional<int> stream_height;
     std::optional<std::string> field_layout_path;
-    CameraBackend camera_backend = CameraBackend::Auto;
+    std::optional<CameraBackend> camera_backend;
 };
 
 int parseInteger(const std::string& value, const std::string& flag) {
@@ -166,6 +175,24 @@ bool parseOnOff(const std::string& value, const std::string& flag) {
         return false;
     }
     throw std::runtime_error("Invalid value for " + flag + ": " + value + " (expected on/off)");
+}
+
+std::string normalizePixelFormat(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::toupper(ch));
+    });
+
+    if (value == "MJPEG") {
+        return "MJPG";
+    }
+    if (value == "YUY2") {
+        return "YUYV";
+    }
+    if (value.size() != 4) {
+        throw std::runtime_error(
+            "Invalid pixel format '" + value + "' (expected a fourcc like MJPG or YUYV)");
+    }
+    return value;
 }
 
 std::string normalizeTagFamilyName(const std::string& value) {
@@ -264,6 +291,29 @@ const char* cameraBackendName(CameraBackend backend) {
     return "auto";
 }
 
+int fourccFromPixelFormat(const std::string& pixel_format) {
+    const std::string normalized = normalizePixelFormat(pixel_format);
+    return cv::VideoWriter::fourcc(
+        normalized[0],
+        normalized[1],
+        normalized[2],
+        normalized[3]);
+}
+
+std::string pixelFormatName(double raw_fourcc) {
+    const auto fourcc = static_cast<std::uint32_t>(std::llround(raw_fourcc));
+    std::string out(4, ' ');
+    out[0] = static_cast<char>(fourcc & 0xFFU);
+    out[1] = static_cast<char>((fourcc >> 8U) & 0xFFU);
+    out[2] = static_cast<char>((fourcc >> 16U) & 0xFFU);
+    out[3] = static_cast<char>((fourcc >> 24U) & 0xFFU);
+
+    if (out == std::string("\0\0\0\0", 4)) {
+        return "unknown";
+    }
+    return out;
+}
+
 cv::VideoCapture openCamera(int camera_index, CameraBackend backend) {
     cv::VideoCapture cap;
 
@@ -323,7 +373,13 @@ void applyOutputOrientation(const cv::Mat& input, cv::Mat& output, OutputOrienta
 }
 
 void applyCameraControls(cv::VideoCapture& cap, const CliOptions& cli) {
-    cap.set(cv::CAP_PROP_BUFFERSIZE, 1);
+    const double buffer_size = cli.low_latency_mode.value_or(true) ? 1.0 : 4.0;
+    cap.set(cv::CAP_PROP_BUFFERSIZE, buffer_size);
+    if (cli.pixel_format.has_value()) {
+        if (!cap.set(cv::CAP_PROP_FOURCC, static_cast<double>(fourccFromPixelFormat(*cli.pixel_format)))) {
+            std::cerr << "Warning: failed to set pixel format " << *cli.pixel_format << ".\n";
+        }
+    }
     if (cli.width.has_value()) {
         cap.set(cv::CAP_PROP_FRAME_WIDTH, *cli.width);
     }
@@ -350,6 +406,21 @@ void applyCameraControls(cv::VideoCapture& cap, const CliOptions& cli) {
     if (cli.brightness.has_value()) {
         if (!cap.set(cv::CAP_PROP_BRIGHTNESS, *cli.brightness)) {
             std::cerr << "Warning: failed to set brightness on this camera/backend.\n";
+        }
+    }
+    if (cli.gain.has_value()) {
+        if (!cap.set(cv::CAP_PROP_GAIN, *cli.gain)) {
+            std::cerr << "Warning: failed to set gain on this camera/backend.\n";
+        }
+    }
+    if (cli.red_awb_gain.has_value()) {
+        if (!cap.set(cv::CAP_PROP_WHITE_BALANCE_RED_V, *cli.red_awb_gain * 100.0)) {
+            std::cerr << "Warning: failed to set red AWB gain on this camera/backend.\n";
+        }
+    }
+    if (cli.blue_awb_gain.has_value()) {
+        if (!cap.set(cv::CAP_PROP_WHITE_BALANCE_BLUE_U, *cli.blue_awb_gain * 100.0)) {
+            std::cerr << "Warning: failed to set blue AWB gain on this camera/backend.\n";
         }
     }
     if (cli.auto_white_balance.has_value()) {
@@ -445,6 +516,16 @@ CliOptions parseArgs(int argc, char** argv) {
             opts.calibration_path = requireValue("--calibration");
         } else if (arg == "--camera-name") {
             opts.camera_name = requireValue("--camera-name");
+        } else if (arg == "--profile-path") {
+            opts.profile_path = requireValue("--profile-path");
+        } else if (arg == "--camera-slot") {
+            const int camera_slot = parseInteger(requireValue("--camera-slot"), "--camera-slot");
+            if (camera_slot < 0 || camera_slot > 3) {
+                throw std::runtime_error("--camera-slot must be in the range [0, 3]");
+            }
+            opts.camera_slot = camera_slot;
+        } else if (arg == "--no-persistent-profile") {
+            opts.no_persistent_profile = true;
         } else if (arg == "--no-display") {
             opts.no_display = true;
         } else if (arg == "--stdout-json") {
@@ -461,6 +542,8 @@ CliOptions parseArgs(int argc, char** argv) {
             opts.height = parsePositiveInt(requireValue("--height"), "--height");
         } else if (arg == "--fps") {
             opts.fps = parsePositiveInt(requireValue("--fps"), "--fps");
+        } else if (arg == "--pixel-format") {
+            opts.pixel_format = normalizePixelFormat(requireValue("--pixel-format"));
         } else if (arg == "--threads") {
             opts.threads = parsePositiveInt(requireValue("--threads"), "--threads");
         } else if (arg == "--quad-decimate") {
@@ -500,12 +583,22 @@ CliOptions parseArgs(int argc, char** argv) {
             opts.exposure = parseDouble(requireValue("--exposure"), "--exposure");
         } else if (arg == "--brightness") {
             opts.brightness = parseDouble(requireValue("--brightness"), "--brightness");
+        } else if (arg == "--gain") {
+            opts.gain = parseNonNegativeDouble(requireValue("--gain"), "--gain");
+        } else if (arg == "--red-awb-gain") {
+            opts.red_awb_gain =
+                parseNonNegativeDouble(requireValue("--red-awb-gain"), "--red-awb-gain");
+        } else if (arg == "--blue-awb-gain") {
+            opts.blue_awb_gain =
+                parseNonNegativeDouble(requireValue("--blue-awb-gain"), "--blue-awb-gain");
         } else if (arg == "--auto-white-balance") {
             opts.auto_white_balance =
                 parseOnOff(requireValue("--auto-white-balance"), "--auto-white-balance");
         } else if (arg == "--white-balance") {
             opts.white_balance =
                 parseNonNegativeDouble(requireValue("--white-balance"), "--white-balance");
+        } else if (arg == "--low-latency-mode") {
+            opts.low_latency_mode = parseOnOff(requireValue("--low-latency-mode"), "--low-latency-mode");
         } else if (arg == "--orientation") {
             opts.orientation = parseOrientation(requireValue("--orientation"));
         } else if (arg == "--stream-width") {
@@ -521,13 +614,79 @@ CliOptions parseArgs(int argc, char** argv) {
         }
     }
 
-    if (opts.calibration_path.empty()) {
-        throw std::runtime_error("Missing required argument: --calibration <path>");
+    return opts;
+}
+
+template <typename T>
+void applyPersistedIfMissing(std::optional<T>& target, const std::optional<T>& source) {
+    if (!target.has_value() && source.has_value()) {
+        target = source;
     }
+}
+
+void applyPersistedProfile(CliOptions& cli, const PersistedCameraProfile& profile) {
+    applyPersistedIfMissing(cli.camera_index, profile.camera_index);
+    applyPersistedIfMissing(cli.calibration_path, profile.calibration_path);
+    applyPersistedIfMissing(cli.camera_name, profile.camera_name);
+    applyPersistedIfMissing(cli.team_number, profile.team_number);
+    applyPersistedIfMissing(cli.nt_server, profile.nt_server);
+    applyPersistedIfMissing(cli.width, profile.width);
+    applyPersistedIfMissing(cli.height, profile.height);
+    applyPersistedIfMissing(cli.fps, profile.fps);
+    applyPersistedIfMissing(cli.pixel_format, profile.pixel_format);
+    applyPersistedIfMissing(cli.threads, profile.threads);
+    applyPersistedIfMissing(cli.quad_decimate, profile.quad_decimate);
+    applyPersistedIfMissing(cli.quad_sigma, profile.quad_sigma);
+    applyPersistedIfMissing(cli.refine_edges, profile.refine_edges);
+    applyPersistedIfMissing(cli.pose_iterations, profile.pose_iterations);
+    applyPersistedIfMissing(cli.max_error_bits, profile.max_error_bits);
+    applyPersistedIfMissing(cli.decision_margin, profile.decision_margin);
+    applyPersistedIfMissing(cli.tag_family, profile.tag_family);
+    applyPersistedIfMissing(cli.auto_exposure, profile.auto_exposure);
+    applyPersistedIfMissing(cli.exposure, profile.exposure);
+    applyPersistedIfMissing(cli.brightness, profile.brightness);
+    applyPersistedIfMissing(cli.gain, profile.gain);
+    applyPersistedIfMissing(cli.red_awb_gain, profile.red_awb_gain);
+    applyPersistedIfMissing(cli.blue_awb_gain, profile.blue_awb_gain);
+    applyPersistedIfMissing(cli.auto_white_balance, profile.auto_white_balance);
+    applyPersistedIfMissing(cli.white_balance, profile.white_balance_temperature);
+    applyPersistedIfMissing(cli.low_latency_mode, profile.low_latency_mode);
+    applyPersistedIfMissing(cli.stream_width, profile.stream_width);
+    applyPersistedIfMissing(cli.stream_height, profile.stream_height);
+    applyPersistedIfMissing(cli.field_layout_path, profile.field_layout_path);
+
+    if (!cli.orientation.has_value() && profile.orientation.has_value()) {
+        cli.orientation = parseOrientation(*profile.orientation);
+    }
+    if (!cli.camera_backend.has_value() && profile.camera_backend.has_value()) {
+        cli.camera_backend = parseCameraBackend(*profile.camera_backend);
+    }
+}
+
+void finalizeCliOptions(CliOptions& opts) {
+    if (!opts.camera_index.has_value()) {
+        opts.camera_index = 0;
+    }
+    if (!opts.camera_name.has_value()) {
+        opts.camera_name = "camera" + std::to_string(*opts.camera_index);
+    }
+    if (!opts.camera_backend.has_value()) {
+        opts.camera_backend = CameraBackend::Auto;
+    }
+    if (opts.pixel_format.has_value()) {
+        opts.pixel_format = normalizePixelFormat(*opts.pixel_format);
+    }
+}
+
+void validateCliOptions(const CliOptions& opts) {
     if (opts.tag_size_meters <= 0.0) {
         throw std::runtime_error("--tag-size must be greater than zero");
     }
-    if (opts.camera_name.empty()) {
+    if (!opts.calibration_path.has_value() || opts.calibration_path->empty()) {
+        throw std::runtime_error(
+            "Missing required calibration path. Pass --calibration <path> or save one in the camera profile.");
+    }
+    if (!opts.camera_name.has_value() || opts.camera_name->empty()) {
         throw std::runtime_error("--camera-name must not be empty");
     }
     if (opts.nt_server.has_value() && opts.nt_server->empty()) {
@@ -546,8 +705,6 @@ CliOptions parseArgs(int argc, char** argv) {
     if (opts.stream_width.has_value() != opts.stream_height.has_value()) {
         throw std::runtime_error("--stream-width and --stream-height must be provided together");
     }
-
-    return opts;
 }
 } // namespace
 
@@ -556,9 +713,32 @@ int main(int argc, char** argv) {
 
     try {
         CliOptions cli = parseArgs(argc, argv);
+        const std::string persistent_profile_path =
+            cli.profile_path.value_or(defaultPersistentProfilePath());
+        if (!cli.no_persistent_profile) {
+            const std::optional<PersistedCameraProfile> persisted_profile =
+                loadPersistedCameraProfile(
+                    persistent_profile_path,
+                    cli.camera_slot,
+                    cli.camera_index.value_or(0));
+            if (persisted_profile.has_value()) {
+                applyPersistedProfile(cli, *persisted_profile);
+                std::cerr << "Loaded persistent camera profile";
+                if (persisted_profile->slot >= 0) {
+                    std::cerr << " slot " << persisted_profile->slot;
+                }
+                std::cerr << " from " << persistent_profile_path << '\n';
+            } else if (cli.profile_path.has_value() || cli.camera_slot.has_value()) {
+                std::cerr << "Warning: no matching persistent camera profile found in "
+                          << persistent_profile_path << '\n';
+            }
+        }
+
+        finalizeCliOptions(cli);
+        validateCliOptions(cli);
 
         Config config = defaultConfig();
-        config.camera_index = cli.camera_index;
+        config.camera_index = *cli.camera_index;
         config.tag_size_meters = cli.tag_size_meters;
         if (cli.tag_family.has_value()) {
             config.tag_family = *cli.tag_family;
@@ -593,7 +773,7 @@ int main(int argc, char** argv) {
 
         cv::Mat camera_matrix, dist_coeffs;
         try {
-            loadCalibration(cli.calibration_path, camera_matrix, dist_coeffs);
+            loadCalibration(*cli.calibration_path, camera_matrix, dist_coeffs);
         } catch (const std::exception& e) {
             std::cerr << "Calibration error: " << e.what() << '\n';
             return 1;
@@ -615,10 +795,10 @@ int main(int argc, char** argv) {
             }
         }
 
-        cv::VideoCapture cap = openCamera(config.camera_index, cli.camera_backend);
+        cv::VideoCapture cap = openCamera(config.camera_index, *cli.camera_backend);
         if (!cap.isOpened()) {
             std::cerr << "Failed to open camera index " << config.camera_index
-                      << " with backend " << cameraBackendName(cli.camera_backend) << '\n';
+                      << " with backend " << cameraBackendName(*cli.camera_backend) << '\n';
             return 1;
         }
 
@@ -641,7 +821,8 @@ int main(int argc, char** argv) {
             std::cerr << " @ " << actual_fps << " FPS";
         }
         std::cerr << '\n';
-        std::cerr << "Camera backend: " << cameraBackendName(cli.camera_backend) << '\n';
+        std::cerr << "Camera backend: " << cameraBackendName(*cli.camera_backend) << '\n';
+        std::cerr << "Camera pixel format: " << pixelFormatName(cap.get(cv::CAP_PROP_FOURCC)) << '\n';
         std::cerr << "AprilTag family: " << config.tag_family << '\n';
         std::cerr << "AprilTag tuning: decimate=" << config.quad_decimate
                   << ", blur=" << config.quad_sigma
@@ -669,7 +850,7 @@ int main(int argc, char** argv) {
         AprilTagDetector detector(config);
 
         PublisherOptions publisher_options;
-        publisher_options.camera_name = cli.camera_name;
+        publisher_options.camera_name = *cli.camera_name;
         publisher_options.team_number = cli.team_number;
         publisher_options.server = cli.nt_server;
         publisher_options.use_stdout_json = cli.stdout_json;
@@ -686,7 +867,8 @@ int main(int argc, char** argv) {
         applyOutputOrientation(frame, output_frame, output_orientation);
         const int stream_width = cli.stream_width.value_or(output_frame.cols);
         const int stream_height = cli.stream_height.value_or(output_frame.rows);
-        cs::CvSource output_stream = frc::CameraServer::PutVideo(cli.camera_name, stream_width, stream_height);
+        cs::CvSource output_stream =
+            frc::CameraServer::PutVideo(*cli.camera_name, stream_width, stream_height);
         output_stream.SetResolution(stream_width, stream_height);
         if (actual_fps > 1.0) {
             output_stream.SetFPS(static_cast<int>(std::lround(actual_fps)));
@@ -803,14 +985,18 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << '\n';
         std::cerr
-            << "Usage: apriltag_vision --calibration <path> [--camera <int>] [--tag-size <meters>] "
-               "[--camera-name <name>] [--team <number> | --nt-server <host>] [--width <px>] "
-               "[--height <px>] [--fps <fps>] [--family <tag36h11>] [--threads <count>] "
+            << "Usage: apriltag_vision [--calibration <path>] [--profile-path <path>] "
+               "[--camera-slot <0-3>] [--no-persistent-profile] [--camera <int>] "
+               "[--tag-size <meters>] [--camera-name <name>] [--team <number> | --nt-server <host>] "
+               "[--width <px>] [--height <px>] [--fps <fps>] [--pixel-format <MJPG|YUYV>] "
+               "[--family <tag36h11>] [--threads <count>] "
                "[--camera-backend <auto|v4l2|gstreamer>] "
                "[--quad-decimate <value>] [--blur <sigma>] [--refine-edges <on|off>] "
                "[--pose-iterations <0-100>] [--max-error-bits <count>] "
                "[--decision-margin-cutoff <value>] [--auto-exposure <on|off>] "
-               "[--exposure <value>] [--brightness <value>] [--auto-white-balance <on|off>] "
+               "[--exposure <value>] [--brightness <value>] [--gain <value>] "
+               "[--red-awb-gain <value>] [--blue-awb-gain <value>] "
+               "[--auto-white-balance <on|off>] [--low-latency-mode <on|off>] "
                "[--white-balance <kelvin>] [--orientation <normal|cw90|180|ccw90>] "
                "[--stream-width <px> --stream-height <px>] [--field-layout <layout.json>] "
                "[--no-display] [--stdout-json] [--record <output.mp4>]\n";

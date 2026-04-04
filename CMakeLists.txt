@@ -62,6 +62,7 @@ add_executable(apriltag_vision
     src/calibration.cpp
     src/detector.cpp
     src/field_layout.cpp
+    src/persistent_config.cpp
     src/pose.cpp
     src/visualize.cpp
     src/publisher.cpp

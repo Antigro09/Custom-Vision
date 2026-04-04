@@ -99,6 +99,27 @@ cmake -B build -S . -Dwpiutil_DIR=/path/to/wpiutil
 - NetworkTables topics under `/Vision/<camera_name>`
 - Optional per-frame JSON on stdout when `--stdout-json` is enabled
 
+## Camera Dashboard
+
+Use `scripts/camera_mode_dashboard.py` on the Jetson when you want PhotonVision-style camera mode selection.
+
+- Auto-detects the supported `pixel format + resolution + FPS` combinations for each camera with `v4l2-ctl` when available
+- Saves up to 4 camera slots in `~/.config/custom_vision/camera_dashboard.json`
+- Persists changes across reboots
+- Exports a YAML snapshot for the currently selected slot
+
+Launch it with:
+
+```bash
+python3 scripts/camera_mode_dashboard.py
+```
+
+Then start the vision process with the saved slot:
+
+```bash
+./build/apriltag_vision --camera-slot 0 --profile-path ~/.config/custom_vision/camera_dashboard.json
+```
+
 ## Usage
 
 ```bash
@@ -112,14 +133,18 @@ cmake -B build -S . -Dwpiutil_DIR=/path/to/wpiutil
 ### CLI flags
 
 - `--camera <int>` camera index (default: `0`)
-- `--camera-name <name>` CameraServer and NT camera name (default: `camera0`)
+- `--camera-name <name>` CameraServer and NT camera name (default: `camera<index>`)
 - `--tag-size <double>` tag size in meters (default: `0.1651`)
-- `--calibration <path>` calibration JSON file (**required**)
+- `--calibration <path>` calibration JSON file. Required unless it was saved in the dashboard profile.
+- `--profile-path <path>` persistent dashboard profile path
+- `--camera-slot <0-3>` select one of the saved dashboard camera slots
+- `--no-persistent-profile` ignore the saved dashboard profile for this launch
 - `--team <number>` connect NT client to a robot team number
 - `--nt-server <host>` connect NT client to a specific host, overrides `--team`
 - `--width <int>` requested camera input width
 - `--height <int>` requested camera input height
 - `--fps <int>` requested camera input FPS
+- `--pixel-format <MJPG|YUYV>` requested camera pixel format/fourcc
 - `--camera-backend <auto|v4l2|gstreamer>` force camera backend selection (`v4l2` is often best on Jetson for explicit mode control)
 - `--family <name>` AprilTag family. Supported: `tag16h5`, `tag25h9`, `tag36h10`, `tag36h11`, `tagCircle21h7`, `tagCircle49h12`, `tagCustom48h12`, `tagStandard41h12`, `tagStandard52h13`
 - `--threads <int>` AprilTag detector thread count
@@ -133,7 +158,11 @@ cmake -B build -S . -Dwpiutil_DIR=/path/to/wpiutil
 - `--auto-exposure <on|off>` camera auto exposure control
 - `--exposure <double>` manual exposure value, requires `--auto-exposure off`
 - `--brightness <double>` camera brightness value
+- `--gain <double>` camera gain value
+- `--red-awb-gain <double>` red auto-white-balance gain slider value
+- `--blue-awb-gain <double>` blue auto-white-balance gain slider value
 - `--auto-white-balance <on|off>` camera auto white-balance control
+- `--low-latency-mode <on|off>` set a smaller capture buffer for lower latency
 - `--white-balance <double>` manual white-balance temperature, requires `--auto-white-balance off`
 - `--orientation <normal|cw90|180|ccw90>` rotate the displayed/streamed output without changing detection geometry
 - `--stream-width <int>` CameraServer stream width. Must be paired with `--stream-height`
@@ -201,11 +230,12 @@ Internally, OpenCV pose estimation still runs in OpenCV's native camera frame fo
 ./build/apriltag_vision --calibration calib.json --camera 1 --camera-name frontCam
 ./build/apriltag_vision --calibration calib.json --team 6328
 ./build/apriltag_vision --calibration calib.json --nt-server 10.0.0.2 --no-display
+./build/apriltag_vision --camera-slot 0 --profile-path ~/.config/custom_vision/camera_dashboard.json
 ./build/apriltag_vision --calibration calib.json --width 1280 --height 720 --fps 60 --family tag36h11 --threads 4 --quad-decimate 1.5 --blur 0 --refine-edges on --pose-iterations 15 --max-error-bits 3 --decision-margin-cutoff 30
 ./build/apriltag_vision --calibration calib.json --field-layout frc-field.json --team 6328
 ./build/apriltag_vision --calibration calib.json --stdout-json --record output.mp4
-./build/apriltag_vision --calibration calib.json --auto-exposure off --exposure -6 --brightness 128 --auto-white-balance off --white-balance 4200 --orientation cw90 --stream-width 640 --stream-height 360
-./build/apriltag_vision --calibration calib.json --camera 0 --camera-backend v4l2 --width 1280 --height 720 --fps 100 --team 1086
+./build/apriltag_vision --calibration calib.json --auto-exposure off --exposure -6 --brightness 128 --gain 75 --auto-white-balance off --white-balance 4200 --orientation cw90 --stream-width 640 --stream-height 360
+./build/apriltag_vision --calibration calib.json --camera 0 --camera-backend v4l2 --pixel-format MJPG --width 1280 --height 720 --fps 100 --team 1086
 ```
 
 ## Calibration JSON format
