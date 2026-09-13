@@ -1,0 +1,10 @@
+{
+  "synthetic_only": true,
+  "position_tolerance_m": 0.015,
+  "requested_frames": 20,
+  "valid_observation_frames": 16,
+  "empty_frames": 4,
+  "stable_fresh_pairs": 15,
+  "lost_targets_cleared": true,
+  "shutdown_cleared": true
+}

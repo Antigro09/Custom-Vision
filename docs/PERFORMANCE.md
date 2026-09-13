@@ -123,3 +123,72 @@ inform field/robot pose conventions.
 [NVIDIA Isaac ROS 3.2 performance methodology](https://nvidia-isaac-ros.github.io/v/release-3.2/performance/index.html)
 is a useful GPU reference, but its playback measurements are not measurements of
 these USB cameras or this application's complete camera-to-robot path.
+
+## YOLO26 object processing — 2026-09-13
+
+Actual FP16 TensorRT 10.3 engines built on this Jetson from official COCO pretrained
+YOLO26n and YOLO26n-seg, exported by Ultralytics 8.4.150. Static batch 1, 640x640
+network input, FP32 I/O, workspace 256 MiB. The local Ultralytics `bus.jpg` fixture
+was resized to 1280x800 and repeatedly processed; each model found five COCO objects
+in every measured frame. These are trained generic models, not team game-piece
+models. No physical camera or team accuracy result is implied.
+
+Each worker warmed up for 30 frames, then processed 300 frames; two-worker rows
+pool 600 samples. Each worker owns its engine/context/stream. Runs are sequential,
+with no engine building, previews or other test jobs during measurement. The
+desktop and existing PhotonVision remained running, with unlocked clocks. These
+are short runs of one image, not a sustained thermal or varied-scene benchmark.
+
+| Model | Camera workers | Median ms | p95 ms | p99 ms | FPS per camera |
+|---|---:|---:|---:|---:|---:|
+| YOLO26n boxes | 1 | 16.494 | 18.195 | 19.221 | 61.62 |
+| YOLO26n boxes | 2 | 16.674 | 19.491 | 22.363 | 59.12 / 59.13 |
+| YOLO26n-seg boxes +5 masks | 1 | 16.735 | 20.196 | 22.766 | 58.86 |
+| YOLO26n-seg boxes +5 masks | 2 | 23.577 | 32.723 | 34.774 | 41.87 / 41.52 |
+
+Timing surrounds the complete detector call: letterbox/normalization, CUDA
+transfers, TensorRT inference, box decoding and bounded mask contours. It excludes
+exposure, camera delivery/MJPEG decoding, metric geometry, NT transport and robot
+receipt. The two-camera segmentation p95 already exceeds the 24 ms goal before
+those additional costs. Start with boxes; evaluate masks against actual floor
+position error and acquisition success before accepting their extra work.
+
+Two-camera median stage timings were 3.092 ms preprocessing /12.577 ms inference /
+0.862 ms decoding for detection, and 3.721/12.734/7.303 ms for segmentation. Stage
+medians need not sum to the median total. Maxima were 23.609 ms and 35.827 ms.
+Cold first calls were roughly 88–202 ms; the runtime's age guard withholds over-age
+frames. Live camera rate remains limited by the negotiated sensor mode.
+
+Native channel splitting and contiguous normalization avoid the previous FP64
+packing path and reuse scratch storage. CPU-only interleaved checks reduced
+letterbox-plus-packing median 3.114→2.063 ms for FP32 and 9.686→2.651 ms for FP16;
+FP32 differs by at most one ULP, FP16 is bitwise identical across all 256 values.
+The earlier two-camera detection run before this change was 16.680 ms median /
+17.963 ms p95. Thus these short unlocked-clock runs do **not** establish an overall
+latency improvement; only the isolated preprocessing improvement was measured.
+
+The final decoder was also compared with the upstream PyTorch FP32 predictor on
+the same image and NMS-free head. Both models matched all five detections; minimum
+box IoU was 0.998765 for detection and 0.997343 for segmentation, with maximum score
+difference 0.002496. Our bounded prototype-resolution contours had IoU 0.840–0.923
+against the largest component of upstream full-resolution masks. This validates
+export/decoder agreement on one fixture, not mask or game-piece accuracy. It also
+quantifies the outline approximation rather than treating a 32-point contour as
+an exact full mask.
+
+The [machine-readable reports](benchmarks/) include model/input hashes, stage
+timings and reference comparisons. Model manifests retain original class order;
+weights/ONNX/engines remain in ignored `models/benchmark/`.
+
+```bash
+.venv/bin/python scripts/benchmark_objects.py \
+  --manifest models/benchmark/detect640/yolo26n.json \
+  --engine models/benchmark/detect640/yolo26n.engine \
+  --image .venv-export/lib/python3.10/site-packages/ultralytics/assets/bus.jpg \
+  --cameras 2 --frames 300 --warmup 30
+```
+
+For segmentation use the `segment640/yolo26n-seg` manifest and engine. Before
+deployment, repeat on actual color-camera recordings, measured target positions,
+empty/confusing scenes and the final fine-tuned model, including sustained
+two-camera load and the complete robot reception path.

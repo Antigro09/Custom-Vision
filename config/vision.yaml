@@ -55,3 +55,41 @@ pipelines:
     robot_to_camera: null
     preview: {rotation_deg: 0}
     settings: {backend: native, mode: 3d, detector_device: cpu, preprocess: cpu, threads: 2, quad_decimate: 2.0, tag_family: tag36h11, tag_size_m: 0.1651, min_decision_margin: 30, max_reprojection_error_px: 3.0, max_ambiguity: 0.2, multitag: true, always_single_tag: false, hfov_deg: 81, vfov_deg: 52}
+
+  # Future color-camera pipeline; enable after supplying the trained engine.
+  - name: intake_objects
+    type: object
+    enabled: false
+    camera:
+      source: 0
+      backend: v4l2
+      fourcc: MJPG
+      width: 640
+      height: 480
+      fps: 30
+      controls: {}
+    calibration: null
+    robot_to_camera: null
+    geometry:
+      target_height_m: null
+      anchor: bbox_center
+      max_range_m: 5.0
+      max_position_std_m: 0.3
+      intake_offset_m:
+      - 0.0
+      - 0.0
+      approach_standoff_m: 0.1
+      tracking_ttl_s: 0.1
+    settings:
+      backend: tensorrt
+      task: detect
+      output_format: yolo26_end2end
+      model_path: ../models/gamepiece.engine
+      labels:
+      - game_piece
+      input_size:
+      - 640
+      - 640
+      confidence_threshold: 0.35
+      max_detections: 16
+      max_masks: 8

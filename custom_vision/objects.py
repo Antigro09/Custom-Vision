@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from pathlib import Path
+import time
 
 import cv2
 import numpy as np
@@ -18,6 +19,8 @@ class LetterboxTransform:
     scale_y: float
     pad_left: int
     pad_top: int
+    input_width: int
+    input_height: int
 
     def restore_boxes(self, boxes: np.ndarray) -> np.ndarray:
         """Map xyxy boxes to original image coordinates and clip to its bounds."""
@@ -57,7 +60,40 @@ def letterbox(frame_bgr: np.ndarray, input_size: int | tuple[int, int]) -> tuple
     return padded, LetterboxTransform(
         original_width, original_height, resized_width / original_width,
         resized_height / original_height, pad_left, pad_top,
+        width, height,
     )
+
+
+class _RGBTensorPacker:
+    """Reuse native planar RGB storage and normalize without strided FP64 work.
+
+    One packer belongs to one camera worker. FP32 multiplication differs from
+    double-precision normalization by at most one FP32 ULP for uint8 pixels.
+    FP16 uses a precomputed exact lookup, avoiding slow per-pixel half conversion.
+    """
+
+    def __init__(self, input_size, dtype):
+        width, height = input_size
+        self.tensor = np.empty((1, 3, height, width), dtype=dtype)
+        self._planes = np.empty(self.tensor.shape, dtype=np.uint8)
+        # split() receives B,G,R destinations, writing directly into R,G,B storage.
+        self._bgr_destinations = [self._planes[0, 2], self._planes[0, 1], self._planes[0, 0]]
+        self._half = self.tensor.dtype == np.float16
+        self._scale = np.float32(1 / 255)
+        if self._half:
+            self._lut = (np.arange(256, dtype=np.float64) / 255).astype(np.float16).view(np.uint16)
+            self._lut_source = self._planes.reshape(-1, width)
+            self._lut_destination = self.tensor.view(np.uint16).reshape(-1, width)
+
+    def pack(self, padded_bgr):
+        cv2.split(padded_bgr, self._bgr_destinations)
+        if self._half:
+            # OpenCV supports uint16 lookup output, so copy exact half bit patterns
+            # into the FP16 tensor through a view; this is not numeric uint16 data.
+            cv2.LUT(self._lut_source, self._lut, dst=self._lut_destination)
+        else:
+            np.multiply(self._planes, self._scale, out=self.tensor, dtype=np.float32)
+        return self.tensor
 
 
 def classwise_nms(boxes: np.ndarray, scores: np.ndarray, class_ids: np.ndarray,
@@ -87,43 +123,142 @@ def classwise_nms(boxes: np.ndarray, scores: np.ndarray, class_ids: np.ndarray,
 
 def decode_yolo_output(output: np.ndarray, labels: list[str], transform: LetterboxTransform,
                        confidence_threshold: float = 0.35, iou_threshold: float = 0.45,
-                       max_detections: int = 100) -> list[dict]:
-    """Decode YOLOv8/YOLO11 raw [1,4+nc,N] (pixel xywh, class probabilities)."""
-    output = np.asarray(output)
-    if output.ndim != 3 or output.shape[:2] != (1, 4 + len(labels)):
-        raise ValueError(
-            f"Expected raw YOLO output [1,{4 + len(labels)},N], got {output.shape}. "
-            "Export a YOLOv8/YOLO11 detection model with nms=False and matching labels."
-        )
+                       max_detections: int = 100, *, output_format: str = "yolov8_raw",
+                       prototypes: np.ndarray | None = None, max_masks: int = 8,
+                       max_contour_points: int = 32, mask_threshold: float = 0.5,
+                       allowed_class_ids: list[int] | None = None) -> list[dict]:
+    """Decode explicit raw xywh or YOLO26 end-to-end xyxy export contracts.
+
+    Segmentation coefficients follow classes in raw output, or follow the six
+    detection columns in end-to-end output. NMS is never repeated for end-to-end.
+    Masks are bounded, prototype-resolution approximations used for an outline
+    and image anchors; they are not calibrated physical contact measurements.
+    """
     if not labels or not 0 <= confidence_threshold <= 1:
         raise ValueError("YOLO needs labels and a confidence threshold in [0,1].")
-    candidates = output[0].T.astype(np.float32, copy=False)
+    if max_detections < 1 or not 0 <= iou_threshold <= 1:
+        raise ValueError("YOLO needs positive max_detections and IoU in [0,1].")
+    if not 1 <= max_masks <= 16 or not 4 <= max_contour_points <= 64 or not 0 < mask_threshold < 1:
+        raise ValueError("Mask limits require 1..16 masks, 4..64 contour points and threshold in (0,1).")
+    mask_channels = 0
+    if prototypes is not None:
+        prototypes = np.asarray(prototypes)
+        if prototypes.ndim != 4 or prototypes.shape[0] != 1 or not 1 <= prototypes.shape[1] <= 128 or min(prototypes.shape[2:]) < 1 or prototypes.size > 128 * 320 * 320:
+            raise ValueError("Expected bounded mask prototypes [1,nm,H,W] (nm <=128, <=13M values).")
+        if not np.all(np.isfinite(prototypes)):
+            raise ValueError("Mask prototypes must be finite.")
+        mask_channels = prototypes.shape[1]
+    output = np.asarray(output)
+    if output_format == "yolov8_raw":
+        expected_channels = 4 + len(labels) + mask_channels
+        valid_shape = output.ndim == 3 and output.shape[:2] == (1, expected_channels)
+        candidates = output[0].T if valid_shape else None
+    elif output_format == "yolo26_end2end":
+        expected_channels = 6 + mask_channels
+        valid_shape = output.ndim == 3 and output.shape[0] == 1 and output.shape[2] == expected_channels
+        candidates = output[0] if valid_shape else None
+    else:
+        raise ValueError("output_format must be yolov8_raw or yolo26_end2end.")
+    if not valid_shape:
+        raise ValueError(
+            f"Expected {'raw YOLO' if output_format == 'yolov8_raw' else 'YOLO26 end-to-end'} "
+            f"output with {expected_channels} channels, got {output.shape}; check output_format, task and labels."
+        )
+    candidates = candidates.astype(np.float32, copy=False)
     # Invalid model output must never leak NaN/Infinity onto NetworkTables or JSON.
     candidates = candidates[np.all(np.isfinite(candidates), axis=1)]
     if not len(candidates):
         return []
-    class_ids = np.argmax(candidates[:, 4:], axis=1)
-    scores = candidates[np.arange(len(candidates)), 4 + class_ids]
+    if output_format == "yolov8_raw":
+        class_ids = np.argmax(candidates[:, 4:4 + len(labels)], axis=1)
+        scores = candidates[np.arange(len(candidates)), 4 + class_ids]
+        coefficients = candidates[:, 4 + len(labels):]
+        boxes = np.concatenate((candidates[:, :2] - candidates[:, 2:4] / 2,
+                                candidates[:, :2] + candidates[:, 2:4] / 2), axis=1)
+    else:
+        scores = candidates[:, 4]
+        raw_classes = candidates[:, 5]
+        if np.any((raw_classes != np.floor(raw_classes)) | (raw_classes < 0) | (raw_classes >= len(labels))):
+            raise ValueError("YOLO26 class indices must be integers within the configured labels.")
+        class_ids = raw_classes.astype(np.int32)
+        coefficients = candidates[:, 6:]
+        boxes = candidates[:, :4]
     if np.any((scores < 0) | (scores > 1)):
         raise ValueError("YOLO class scores must be probabilities in [0,1]; logits are unsupported.")
-    valid = (scores >= confidence_threshold) & (candidates[:, 2] > 0) & (candidates[:, 3] > 0)
-    candidates, scores, class_ids = candidates[valid], scores[valid], class_ids[valid]
-    if not len(candidates):
+    valid = (scores >= confidence_threshold) & (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+    if allowed_class_ids is not None:
+        valid &= np.isin(class_ids, allowed_class_ids)
+    boxes, scores, class_ids, coefficients = boxes[valid], scores[valid], class_ids[valid], coefficients[valid]
+    if not len(boxes):
         return []
     # Bound CPU NMS work for an unexpectedly noisy model at startup.
     order = np.argsort(-scores, kind="stable")[:3000]
-    candidates, scores, class_ids = candidates[order], scores[order], class_ids[order]
-    boxes = np.concatenate((candidates[:, :2] - candidates[:, 2:4] / 2,
-                            candidates[:, :2] + candidates[:, 2:4] / 2), axis=1)
+    boxes, scores, class_ids, coefficients = boxes[order], scores[order], class_ids[order], coefficients[order]
+    network_boxes = boxes.copy()
     boxes = transform.restore_boxes(boxes)
     valid = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
     boxes, scores, class_ids = boxes[valid], scores[valid], class_ids[valid]
-    keep = classwise_nms(boxes, scores, class_ids, iou_threshold, max_detections)
-    return [
-        _detection(int(class_ids[i]), labels[int(class_ids[i])], float(scores[i]), boxes[i],
-                   transform.original_width, transform.original_height)
-        for i in keep
-    ]
+    network_boxes, coefficients = network_boxes[valid], coefficients[valid]
+    keep = (classwise_nms(boxes, scores, class_ids, iou_threshold, max_detections)
+            if output_format == "yolov8_raw" else list(range(min(len(boxes), max_detections))))
+    detections = []
+    for rank, i in enumerate(keep):
+        detection = _detection(int(class_ids[i]), labels[int(class_ids[i])], float(scores[i]), boxes[i],
+                               transform.original_width, transform.original_height)
+        detection["confidence_kind"] = "model_score"
+        if prototypes is not None:
+            detection["segmentation"] = None
+            detection["segmentation_status"] = "mask_limit" if rank >= max_masks else "empty"
+            if rank < max_masks:
+                segmentation = _decode_mask(prototypes[0], coefficients[i], network_boxes[i], transform,
+                                            max_contour_points, mask_threshold)
+                detection["segmentation"] = segmentation
+                if segmentation is not None:
+                    detection["segmentation_status"] = "valid"
+        detections.append(detection)
+    return detections
+
+
+def _decode_mask(prototypes, coefficients, box, transform, max_points, threshold):
+    """Decode only the box's prototype crop; avoid full-resolution mask allocations."""
+    channels, height, width = prototypes.shape
+    sx, sy = width / transform.input_width, height / transform.input_height
+    # Select prototype pixel centers inside the continuous box. floor(left)
+    # can include a center outside a fractional box and produce an invalid anchor.
+    x1, y1 = max(0, math.ceil(box[0] * sx - 0.5)), max(0, math.ceil(box[1] * sy - 0.5))
+    x2, y2 = min(width, math.ceil(box[2] * sx - 0.5)), min(height, math.ceil(box[3] * sy - 0.5))
+    # Also exclude padding so centroids cannot lie outside the camera image.
+    x1 = max(x1, math.ceil(transform.pad_left * sx - 0.5))
+    y1 = max(y1, math.ceil(transform.pad_top * sy - 0.5))
+    x2 = min(x2, math.ceil((transform.pad_left + transform.original_width * transform.scale_x) * sx - 0.5))
+    y2 = min(y2, math.ceil((transform.pad_top + transform.original_height * transform.scale_y) * sy - 0.5))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop = np.ascontiguousarray(prototypes[:, y1:y2, x1:x2], dtype=np.float32).reshape(channels, -1)
+    logits = cv2.gemm(coefficients.astype(np.float32, copy=False).reshape(1, channels), crop, 1, None, 0)
+    mask = (logits.reshape(y2 - y1, x2 - x1) > math.log(threshold / (1 - threshold))).astype(np.uint8)
+    contours, _hierarchy = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    contour = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(contour) < 1:
+        return None
+    moments = cv2.moments(contour)
+    if moments["m00"] <= 0:
+        return None
+    points = contour.reshape(-1, 2).astype(np.float64)
+    centroid = np.array([moments["m10"] / moments["m00"], moments["m01"] / moments["m00"]])
+    bottom_y = points[:, 1].max()
+    bottom = np.array([np.median(points[points[:, 1] == bottom_y, 0]), bottom_y])
+    def restore(points):
+        restored = (points + [x1 + 0.5, y1 + 0.5]) / [sx, sy]
+        restored = (restored - [transform.pad_left, transform.pad_top]) / [transform.scale_x, transform.scale_y]
+        return np.clip(restored, [0, 0], [transform.original_width - 1, transform.original_height - 1]).tolist()
+    if len(points) > max_points:
+        points = points[np.linspace(0, len(points), max_points, endpoint=False, dtype=int)]
+    return {"contour_px": restore(points), "centroid_px": restore(centroid), "bottom_px": restore(bottom),
+            "area_px": float(moments["m00"] / (sx * sy * transform.scale_x * transform.scale_y)),
+            "approximate": True, "resolution": [width, height]}
 
 
 def _detection(class_id: int, label: str, confidence: float, box,
@@ -149,9 +284,10 @@ class ObjectPipeline:
         self.backend = config.get("backend", "contour")
         self._model = None
         self._calibration = None
-        self.max_detections = int(config.get("max_detections", 100))
-        if self.max_detections < 1:
-            raise ValueError("max_detections must be positive.")
+        self.max_detections = int(config.get("max_detections", 16))
+        if not 1 <= self.max_detections <= 32:
+            raise ValueError("max_detections must be in 1..32.")
+        self.last_timings = {}
         if calibration is not None:
             try:
                 matrix = np.asarray(calibration["camera_matrix"], dtype=np.float64)
@@ -192,9 +328,22 @@ class ObjectPipeline:
                 if not 0 < self.max_area_fraction <= 1 or not 0 <= self.min_circularity <= 1:
                     raise ValueError("max_area_fraction must be in (0,1]; min_circularity must be in [0,1].")
         elif self.backend in ("tensorrt", "opencv_onnx"):
+            self.output_format = config.get("output_format", "yolov8_raw")
+            self.task = config.get("task", "detect")
+            if self.output_format not in ("yolov8_raw", "yolo26_end2end") or self.task not in ("detect", "segment"):
+                raise ValueError("Neural output_format must be yolov8_raw or yolo26_end2end; task must be detect or segment.")
+            self.max_masks = int(config.get("max_masks", 8))
+            self.max_contour_points = int(config.get("max_contour_points", 32))
+            self.mask_threshold = float(config.get("mask_threshold", 0.5))
+            if not 1 <= self.max_masks <= 16 or not 4 <= self.max_contour_points <= 64 or not 0 < self.mask_threshold < 1:
+                raise ValueError("Mask limits require 1..16 masks, 4..64 contour points and threshold in (0,1).")
             self.labels = config.get("labels", [])
             if not isinstance(self.labels, list) or not self.labels or any(not isinstance(label, str) or not label for label in self.labels):
                 raise ValueError("Neural object detection requires a nonempty labels list in training class order.")
+            self.allowed_class_ids = config.get("allowed_class_ids")
+            if self.allowed_class_ids is not None and (not isinstance(self.allowed_class_ids, list) or
+                    any(type(value) is not int or not 0 <= value < len(self.labels) for value in self.allowed_class_ids)):
+                raise ValueError("allowed_class_ids must contain integer indices into labels.")
             self.input_size = _input_size(config.get("input_size", 640))
             self.confidence_threshold = float(config.get("confidence_threshold", 0.35))
             self.iou_threshold = float(config.get("iou_threshold", 0.45))
@@ -209,7 +358,7 @@ class ObjectPipeline:
             if self.backend == "tensorrt":
                 from .tensorrt_backend import TensorRTEngine
 
-                self._model = TensorRTEngine(path, len(self.labels))
+                self._model = TensorRTEngine(path, len(self.labels), output_format=self.output_format, task=self.task)
                 expected = (1, 3, self.input_size[1], self.input_size[0])
                 if self._model.input_shape != expected:
                     actual = self._model.input_shape
@@ -219,6 +368,9 @@ class ObjectPipeline:
                 self._model = cv2.dnn.readNetFromONNX(str(path))
                 self._model.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
                 self._model.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+            dtype = self._model.input_dtype if self.backend == "tensorrt" else np.float32
+            self._rgb_packer = _RGBTensorPacker(self.input_size, dtype)
+            self._tensor = self._rgb_packer.tensor
         else:
             raise ValueError(f"Unsupported object backend {self.backend!r}; use contour, hsv, tensorrt, or opencv_onnx.")
 
@@ -232,6 +384,7 @@ class ObjectPipeline:
         return values.astype(np.uint8)
 
     def process(self, frame_bgr: np.ndarray) -> list[dict]:
+        started = time.perf_counter()
         if not isinstance(frame_bgr, np.ndarray) or frame_bgr.dtype != np.uint8 or frame_bgr.ndim not in (2, 3) or min(frame_bgr.shape[:2]) <= 0:
             raise ValueError("ObjectPipeline.process requires a nonempty uint8 grayscale [H,W] or BGR [H,W,3] image.")
         if frame_bgr.ndim == 2:
@@ -247,13 +400,38 @@ class ObjectPipeline:
             detections = self._process_hsv(frame_bgr)
         else:
             padded, transform = letterbox(frame_bgr, self.input_size)
-            tensor = np.ascontiguousarray(padded[:, :, ::-1].transpose(2, 0, 1)[None], dtype=np.float32) / 255.0
+            self._rgb_packer.pack(padded)
+            prepared = time.perf_counter()
+            def decode(outputs):
+                if self.task == "segment":
+                    if not isinstance(outputs, (tuple, list)) or len(outputs) != 2:
+                        raise ValueError("Segmentation needs detection and prototype outputs.")
+                    # Output names are exporter-dependent: identify by rank, not order.
+                    predictions = [value for value in outputs if value.ndim == 3]
+                    prototypes = [value for value in outputs if value.ndim == 4]
+                    if len(predictions) != 1 or len(prototypes) != 1:
+                        raise ValueError("Segmentation needs one rank-3 prediction and one rank-4 prototype output.")
+                    output, proto = predictions[0], prototypes[0]
+                else:
+                    output, proto = outputs, None
+                return decode_yolo_output(output, self.labels, transform, self.confidence_threshold,
+                                          self.iou_threshold, self.max_detections, output_format=self.output_format,
+                                          prototypes=proto, max_masks=self.max_masks,
+                                          max_contour_points=self.max_contour_points,
+                                          mask_threshold=self.mask_threshold, allowed_class_ids=self.allowed_class_ids)
             if self.backend == "tensorrt":
-                output = self._model.infer(tensor)
+                # Decode while the engine lock protects its reusable pinned outputs.
+                detections = self._model.infer(self._tensor, decoder=decode)
+                self.last_timings = {"preprocess_ms": (prepared - started) * 1000, **self._model.last_timings}
             else:
-                self._model.setInput(tensor)
-                output = self._model.forward()
-            detections = decode_yolo_output(output, self.labels, transform, self.confidence_threshold, self.iou_threshold, self.max_detections)
+                self._model.setInput(self._tensor)
+                output = (self._model.forward(self._model.getUnconnectedOutLayersNames())
+                          if self.task == "segment" else self._model.forward())
+                inferred = time.perf_counter()
+                detections = decode(output)
+                self.last_timings = {"preprocess_ms": (prepared - started) * 1000,
+                                     "inference_ms": (inferred - prepared) * 1000,
+                                     "decode_ms": (time.perf_counter() - inferred) * 1000}
         if self._calibration is not None and detections:
             matrix, distortion, _size = self._calibration
             centers = np.asarray([detection["center"] for detection in detections], dtype=np.float64).reshape(-1, 1, 2)
@@ -261,6 +439,7 @@ class ObjectPipeline:
             for detection, (x, y) in zip(detections, rays):
                 detection["yaw_deg"] = float(math.degrees(math.atan(x)))
                 detection["pitch_deg"] = float(math.degrees(math.atan(-y)))
+        self.last_timings["total_ms"] = (time.perf_counter() - started) * 1000
         return detections
 
     def _process_contour(self, frame_bgr: np.ndarray) -> list[dict]:

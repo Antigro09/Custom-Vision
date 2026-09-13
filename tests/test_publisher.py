@@ -84,3 +84,45 @@ def test_wire_precision_preserves_integer_timestamps_and_host_values():
     assert compact['translation_m']==[1.234568,-.123457]
     assert raw['translation_m'][0]==1.23456789
     assert abs(compact['yaw_deg']-raw['yaw_deg']) < .0000005
+
+
+def test_object_selection_topics_clear_on_lost_target_or_disconnect():
+    pub=Publisher({'enabled':False})
+    pub.instance=Instance(None)
+    data=packet()
+    target={'valid':True,'observed':True,'track_id':17,'translation_m':[2,.2,.05],
+            'approach':{'translation_m':[1.4,.2,0]}}
+    data['objects']={'valid':True,'selected_target':target,'targets':[target]}
+    pub.publish(data)
+    topics=pub.instance.topics
+    assert topics['target_valid'].value is True
+    assert topics['selected_track_id'].value==17
+    assert topics['selected_target_robot'].value==[2,.2,.05]
+    assert topics['approach_robot_xy'].value==[1.4,.2]
+    assert topics['object_track_ids'].value==[17]
+    for connected in [True,False]:
+        data.update(connected=connected,objects={'valid':False,'selected_target':None,'targets':[]})
+        pub.publish(data)
+        assert topics['target_valid'].value is False
+        assert topics['selected_track_id'].value==0
+        assert all(topics[key].value==[] for key in ['selected_target_robot','approach_robot_xy','object_track_ids'])
+
+
+def test_object_wire_targets_remain_coherent_without_mutating_dashboard_payload():
+    from custom_vision.publisher import wire_packet
+    target={'valid':True,'observed':True,'track_id':7,'translation_m':[1.23456789,.2,.05],
+            'capture_monotonic_us':1234567890123456,'uncertainty':{'range_std_m':.012345678},
+            'approach':{'translation_m':[.8,.2,0]}}
+    data={'detections':[{'robot_relative':target}, {'robot_relative':{'valid':False,'reason':'horizon'}}],
+          'objects':{'valid':True,'targets':[target],'selected_target':target,'selected_track_id':7}}
+    wire=wire_packet(data)
+    assert 'selected_target' not in wire['objects']
+    assert wire['detections'][0]['robot_relative']=={'valid':True,'track_id':7}
+    assert wire['detections'][1]['robot_relative']=={'valid':False,'reason':'horizon'}
+    canonical=next(t for t in wire['objects']['targets'] if t['track_id']==wire['objects']['selected_track_id'])
+    assert canonical['translation_m']==[1.234568,.2,.05]
+    assert canonical['capture_monotonic_us']==1234567890123456
+    assert canonical['uncertainty']['range_std_m']==.012346
+    assert canonical['approach']['translation_m']==[.8,.2,0]
+    assert data['objects']['selected_target'] is target
+    assert data['detections'][0]['robot_relative']['translation_m'][0]==1.23456789

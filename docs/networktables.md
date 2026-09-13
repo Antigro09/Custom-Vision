@@ -92,3 +92,36 @@ A future consumer should:
 No robot movement, autonomous commands or pose-estimator integration is enabled by
 this repository. Future Java helpers can wrap this packet without forcing a
 separate published library.
+
+
+## Object acquisition extension
+
+Object frames use `type: object`, `mode: detect|segment`, and the actual backend
+and detector device. They retain timestamp/freshness/boot semantics above. Camera
+`yaw_deg` remains the legacy positive-right bearing; use the new metric target's
+**`bearing_deg` positive-left** and NWU `translation_m` for robot-relative targeting.
+
+The coherent JSON `objects.targets` contains each fresh valid target exactly once:
+track ID, class/label, capture timestamp, robot XYZ, XY range, bearing, uncertainty,
+anchor method and intake-relative approach displacement. `objects.selected_track_id`
+selects one target from that list. On the wire, detection `robot_relative` is a
+`{valid,track_id}` reference (or an invalid reason); the full selected target is not
+repeated. Browser `/api/status` retains expanded objects for convenient inspection.
+This reduces packet size without losing metrics. Segmentation publishes bounded
+contours, not dense image-sized masks.
+
+| Additional topic | Type | Meaning |
+|---|---|---|
+| `target_valid` | boolean | A selected, current measured object target is valid |
+| `selected_track_id` | integer | Selected ID, 0 when invalid |
+| `selected_target_robot` | double[] | Robot-relative `[x,y,z]` meters at capture, empty if invalid |
+| `approach_robot_xy` | double[] | Capture-heading-preserving approach displacement `[dx,dy]`, not a planned path |
+| `object_track_ids` | integer[] | Current valid observed target IDs |
+
+No odometry is supplied to this process: targets are not field-fixed, motion-
+compensated or extrapolated through missed frames. IDs provide brief association,
+not proof of object identity during occlusion. The robot must expire packets and
+transform measurements using robot pose at capture time if building a field map.
+Unknown calibration/mount/target height means no metric target. Camera failure,
+late frames, empty detections and shutdown clear selection topics. Receiver-side
+freshness checks remain required even when retained NT values look valid.

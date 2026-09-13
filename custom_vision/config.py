@@ -102,6 +102,13 @@ def validate_config(data, directory):
                 if not isinstance(values,list) or len(values)!=3:
                     raise ValueError(f'robot_to_camera.{key} requires three numbers')
                 for value in values: finite(value,f'robot_to_camera.{key}',-1000,1000)
+        if pipeline['type']=='object':
+            from .object_geometry import validate_geometry_settings
+            validate_geometry_settings(mapping(pipeline.setdefault('geometry',{}),'geometry'))
+            if settings.get('task','detect') not in ('detect','segment'):
+                raise ValueError('Object task must be detect or segment')
+            if settings.get('output_format','yolov8_raw') not in ('yolov8_raw','yolo26_end2end'):
+                raise ValueError('Unsupported YOLO output format')
         preview_settings(pipeline.setdefault('preview',{}))
     if not any(p['enabled'] for p in pipelines):
         raise ValueError('At least one pipeline must be enabled')

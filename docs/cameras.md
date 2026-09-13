@@ -38,6 +38,7 @@ The second tag camera has a disabled `rear_tags` profile. Enable it only after
 selecting its own stable source and calibration. Start with two detector threads
 per camera on this six-core Jetson and measure combined load.
 
-The future color camera and floor-pickup design are described in
-[the object proposal](OBJECT_ACQUISITION_PROPOSAL.md). New object work is paused;
-no game-piece class or camera specification is assumed.
+The implemented color-model and floor-pickup geometry are described in
+[object setup](objects.md) and [object ranging](object_geometry.md). The future
+color camera's modes, measured intrinsics/mount and final game-piece class are
+still required. The intake camera will point downward as planned by the team.

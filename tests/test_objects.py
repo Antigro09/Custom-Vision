@@ -209,3 +209,154 @@ def test_invalid_configuration_rejected(config):
 def test_invalid_frame_rejected(frame):
     with pytest.raises(ValueError):
         ObjectPipeline({}).process(frame)
+
+
+def test_yolo26_end2end_uses_xyxy_and_preserves_overlapping_predictions():
+    _, transform = letterbox(np.zeros((100, 200, 3), np.uint8), 200)
+    output = np.array([[[30, 80, 70, 110, .9, 0], [31, 80, 71, 110, .8, 0],
+                        [170, 80, 220, 120, .7, 1], [10, 10, 20, 20, .9, 0]]], np.float32)
+    detections = decode_yolo_output(output, ["ball", "other"], transform, output_format="yolo26_end2end")
+    assert len(detections) == 3  # No NMS for the learned one-to-one head.
+    assert detections[0]["bbox_xyxy"] == [30, 30, 70, 60]
+    assert detections[-1]["bbox_xyxy"] == [170, 30, 200, 70]
+    assert detections[0]["confidence_kind"] == "model_score"
+    selected = decode_yolo_output(output, ["ball", "other"], transform, output_format="yolo26_end2end", allowed_class_ids=[1])
+    assert len(selected) == 1 and selected[0]["class_id"] == 1
+
+
+@pytest.mark.parametrize("row", [[0, 0, 20, 20, 2, 0], [0, 0, 20, 20, .9, .5], [0, 0, 20, 20, .9, -1], [0, 0, 20, 20, .9, 2]])
+def test_yolo26_rejects_invalid_scores_or_classes(row):
+    _, transform = letterbox(np.zeros((32, 32, 3), np.uint8), 32)
+    with pytest.raises(ValueError):
+        decode_yolo_output(np.array([[row]], np.float32), ["ball"], transform, output_format="yolo26_end2end")
+
+
+def test_yolo26_filters_nan_and_bounds_top_k():
+    _, transform = letterbox(np.zeros((32, 32, 3), np.uint8), 32)
+    output = np.array([[[0, 0, 20, 20, .9, 0], [0, 0, 20, 20, np.nan, 0],
+                        [3, 3, 20, 20, .95, 0], [0, 0, 0, 0, .99, 0]]], np.float32)
+    result = decode_yolo_output(output, ["ball"], transform, max_detections=1, output_format="yolo26_end2end")
+    assert len(result) == 1 and result[0]["bbox_xyxy"] == [3, 3, 20, 20]
+    json.dumps(result, allow_nan=False)
+
+
+@pytest.mark.parametrize("output_format", ["yolov8_raw", "yolo26_end2end"])
+def test_segmentation_prototypes_are_unpadded_and_compact(output_format):
+    _, transform = letterbox(np.zeros((100, 200, 3), np.uint8), 200)
+    proto = np.full((1, 2, 50, 50), -8, np.float32)
+    proto[0, 0, 20:30, 10:20] = 8
+    if output_format == "yolo26_end2end":
+        output = np.array([[[30, 70, 90, 130, .9, 0, 1, 0]]], np.float32)
+    else:
+        output = np.array([[[60], [100], [60], [60], [.9], [1], [0]]], np.float32)
+    result = decode_yolo_output(output, ["ball"], transform, output_format=output_format, prototypes=proto)
+    segmentation = result[0]["segmentation"]
+    assert segmentation["centroid_px"] == pytest.approx([60, 50])
+    assert segmentation["bottom_px"] == pytest.approx([60, 68])
+    assert len(segmentation["contour_px"]) <= 32
+    assert segmentation["approximate"] is True
+    assert "mask" not in segmentation
+    json.dumps(result, allow_nan=False)
+
+
+def test_segmentation_mask_limit_empty_invalid_and_cropped_padding():
+    _, transform = letterbox(np.zeros((32, 32, 3), np.uint8), 32)
+    proto = np.ones((1, 1, 8, 8), np.float32)
+    output = np.array([[[0, 0, 32, 32, .9, 0, 1], [1, 1, 31, 31, .8, 0, 1]]], np.float32)
+    result = decode_yolo_output(output, ["ball"], transform, output_format="yolo26_end2end", prototypes=proto, max_masks=1)
+    assert result[0]["segmentation_status"] == "valid"
+    assert result[1]["segmentation"] is None and result[1]["segmentation_status"] == "mask_limit"
+    empty = decode_yolo_output(output, ["ball"], transform, output_format="yolo26_end2end", prototypes=-proto)
+    assert empty[0]["segmentation"] is None and empty[0]["segmentation_status"] == "empty"
+    with pytest.raises(ValueError, match="finite"):
+        decode_yolo_output(output, ["ball"], transform, output_format="yolo26_end2end", prototypes=proto * np.nan)
+    with pytest.raises(ValueError, match="channels"):
+        decode_yolo_output(output, ["ball"], transform, output_format="yolo26_end2end", prototypes=np.ones((1, 2, 8, 8)))
+
+
+@pytest.mark.parametrize("settings", [{"max_detections":33}, {"task":"pose"}, {"output_format":"auto"}, {"max_masks":17}, {"mask_threshold":0}, {"allowed_class_ids":[1]}])
+def test_neural_settings_reject_unbounded_or_ambiguous_contracts(settings, tmp_path):
+    path = tmp_path / "weights.engine"
+    path.touch()
+    with pytest.raises(ValueError):
+        ObjectPipeline({"backend":"tensorrt", "labels":["ball"], "model_path":str(path), **settings})
+
+
+def test_opencv_segment_fetches_both_outputs_and_reuses_input(monkeypatch, tmp_path):
+    class FakeSegmentNetwork:
+        def setPreferableBackend(self, _backend):
+            pass
+        def setPreferableTarget(self, _target):
+            pass
+        def setInput(self, tensor):
+            self.tensor = tensor
+        def getUnconnectedOutLayersNames(self):
+            return ["prototypes", "predictions"]
+        def forward(self, names):
+            assert names == ["prototypes", "predictions"]
+            return [np.ones((1, 1, 8, 8), np.float32),
+                    np.array([[[8, 8, 24, 24, .9, 0, 1]]], np.float32)]
+    network = FakeSegmentNetwork()
+    monkeypatch.setattr(cv2.dnn, "readNetFromONNX", lambda _path: network)
+    model = tmp_path / "segment.onnx"
+    model.touch()
+    pipeline = ObjectPipeline({"backend":"opencv_onnx", "model_path":str(model), "labels":["ball"],
+                               "input_size":32, "task":"segment", "output_format":"yolo26_end2end"})
+    first = pipeline.process(np.zeros((32, 32, 3), np.uint8))
+    input_identity = id(network.tensor)
+    second = pipeline.process(np.full((32, 32, 3), 255, np.uint8))
+    assert id(network.tensor) == input_identity
+    assert np.all(network.tensor == 1)
+    assert first == second
+    assert first[0]["segmentation_status"] == "valid"
+    assert pipeline.last_timings["decode_ms"] >= 0
+
+
+def test_segmentation_pixel_centers_stay_inside_fractional_box():
+    _, transform = letterbox(np.zeros((32, 32, 3), np.uint8), 32)
+    output = np.array([[[11.1, 11.1, 20.9, 20.9, .9, 0, 1]]], np.float32)
+    result = decode_yolo_output(output, ["ball"], transform, output_format="yolo26_end2end",
+                               prototypes=np.ones((1, 1, 8, 8), np.float32))
+    segmentation = result[0]["segmentation"]
+    assert segmentation["bottom_px"] == pytest.approx([16, 18])
+    for x, y in segmentation["contour_px"]:
+        assert 11.1 <= x < 20.9 and 11.1 <= y < 20.9
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float16])
+def test_rgb_packer_all_uint8_values_preserves_normalization_and_storage(dtype):
+    from custom_vision.objects import _RGBTensorPacker
+    values = np.arange(256, dtype=np.uint8)
+    frame = np.stack([values, 255 - values, np.roll(values, 91)], axis=-1)[None]
+    frame = np.repeat(frame, 32, axis=0)
+    packer = _RGBTensorPacker((256, 32), dtype)
+    output = packer.pack(frame)
+    expected = (frame[:, :, ::-1].transpose(2, 0, 1)[None].astype(np.float64) / 255).astype(dtype)
+    if dtype == np.float16:
+        np.testing.assert_array_equal(output.view(np.uint16), expected.view(np.uint16))
+    else:
+        np.testing.assert_allclose(output, expected, rtol=0, atol=6e-8)
+    assert output.dtype == dtype and output.flags.c_contiguous
+    address = output.ctypes.data
+    second = packer.pack(np.full_like(frame, 255))
+    assert second is output and second.ctypes.data == address
+    assert np.all(second == 1)
+    assert packer.pack(np.zeros_like(frame)) is output
+    assert not np.any(output)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float16])
+def test_rgb_packer_matches_letterboxed_noncontiguous_color_input(dtype):
+    from custom_vision.objects import _RGBTensorPacker
+    rng = np.random.default_rng(1086)
+    frame = rng.integers(0, 256, (61, 97, 3), dtype=np.uint8)[:, ::-1]
+    assert not frame.flags.c_contiguous
+    padded, transform = letterbox(frame, (96, 64))
+    output = _RGBTensorPacker((96, 64), dtype).pack(padded)
+    expected = (padded[:, :, ::-1].transpose(2, 0, 1)[None].astype(np.float64) / 255).astype(dtype)
+    if dtype == np.float16:
+        np.testing.assert_array_equal(output.view(np.uint16), expected.view(np.uint16))
+    else:
+        np.testing.assert_allclose(output, expected, rtol=0, atol=6e-8)
+    assert transform.pad_top > 0
+    assert np.allclose(output[0, :, 0, 0], 114 / 255, atol=2e-4)

@@ -1,6 +1,6 @@
 # Team 1086 Custom Vision
 
-AprilTag aiming and robot localization for the Jetson Orin Nano Super, with a
+AprilTag localization and object acquisition vision for the Jetson Orin Nano Super, with a
 browser setup interface and NetworkTables 4 output. The detector and single-tag
 pose solver run in C++; Python manages cameras, configuration, joint localization
 and publication. Each camera has an independent worker that takes the newest
@@ -21,9 +21,12 @@ frame. Preview rendering runs separately and only when requested.
 - **NT4:** coherent versioned JSON per frame, synchronized server timestamps when
   available, pose convenience topics, boot identifiers and freshness watchdogs.
 
-The existing object backends are retained but disabled in this AprilTag profile.
-New object development is paused at the user's request; see the
-[floor-pickup proposal](docs/OBJECT_ACQUISITION_PROPOSAL.md).
+YOLO26 detection and instance segmentation now run through TensorRT, with
+calibrated object ranging, track IDs, current-frame selection and intake-offset
+approach coordinates. The default profile includes a disabled future color-camera
+pipeline; `config/objects.yaml` is the dedicated object-Jetson template. Supply the
+trained model, real camera calibration and measured geometry before enabling it.
+See [object setup](docs/objects.md) and [the ROS/box/segmentation decision](docs/ROS_AND_OBJECT_DESIGN.md).
 
 ## Start on this Jetson
 
@@ -72,16 +75,21 @@ scene, cameras, calibration, quality thresholds and timing method.
 ```bash
 .venv/bin/python -m pytest -q
 .venv/bin/python scripts/smoke_test.py
+.venv/bin/python scripts/smoke_objects.py
 .venv/bin/python scripts/benchmark_apriltags.py --backend native --cameras 2
 .venv/bin/python scripts/demo_apriltags.py --port 5802
+# Run separately on the same port for the object geometry demo:
+.venv/bin/python scripts/demo_objects.py --port 5802
 ```
 
-The demo serves an explicitly synthetic three-tag field scene at
+The AprilTag demo serves an explicitly synthetic three-tag field scene at
 `http://127.0.0.1:5802`, with NetworkTables disabled. Its files are under ignored
 `data/apriltag-demo/`; it does not replace production calibration. The smoke test
 checks 2D, single-tag and multi-tag localization through synthetic MJPEG video,
 including clearing all targets at shutdown. Desktop CI builds the CPU native module;
 Jetson tests additionally exercise available CUDA and TensorRT hardware.
+The object demo uses three rendered ball candidates with known coordinates and
+always disables NT. It tests geometry and controls, not neural-model accuracy.
 
 ## Setup guides
 
@@ -90,6 +98,8 @@ Jetson tests additionally exercise available CUDA and TensorRT hardware.
 - [Field coordinates, mounting and MultiTag](docs/localization.md)
 - [Browser controls](docs/dashboard.md)
 - [NetworkTables contract and future robot integration](docs/networktables.md)
+- [Object geometry and tracking](docs/object_geometry.md)
+- [YOLO26 export and training tools](docs/yolo_exports.md)
 - [Performance measurements and live acceptance procedure](docs/PERFORMANCE.md)
 - [Setup status](docs/SETUP_REPORT.md)
 

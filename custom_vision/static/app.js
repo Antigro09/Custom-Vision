@@ -91,12 +91,28 @@ function updateDetectorDevice() {
   if ($('tag-backend').value !== 'native') value('tag-device', 'cpu');
 }
 $('tag-backend').onchange = updateDetectorDevice;
+const objectNeuralFields = ['object-task','object-format','object-model','object-labels','object-width','object-height','object-confidence'];
+function updateObjectBackend() {
+  const neural = ['tensorrt', 'opencv_onnx'].includes($('object-backend').value);
+  $('object-neural-settings').hidden = !neural;
+  for (const id of objectNeuralFields) $(id).disabled = selectedPipeline()?.type === 'apriltag' || !neural;
+  $('object-backend-note').textContent = neural
+    ? 'Use a trained model already stored on this Jetson. Labels must match training class order; input dimensions and output format must match the exported model.'
+    : 'This shape or color baseline reports candidates, not a trained neural detector. Its score describes circularity or color fill, not model probability.';
+}
+$('object-backend').onchange = updateObjectBackend;
 function populatePipeline() {
   const pipeline = selectedPipeline(); if (!pipeline) return;
   const camera = pipeline.camera || {}, tags = pipeline.settings || {}, mount = pipeline.robot_to_camera || {};
+  const isObject = pipeline.type !== 'apriltag', geometry = pipeline.geometry || {};
   const preview = {...(state.config.dashboard || {}), ...(pipeline.preview || {})};
   $('pipeline-title').textContent = pipeline.name;
-  $('pipeline-description').textContent = pipeline.type === 'apriltag' ? 'AprilTag aiming and calibrated robot localization' : 'Object pipeline · existing backend configuration';
+  $('pipeline-description').textContent = isObject ? 'Object detection and calibrated robot-relative targets' : 'AprilTag aiming and calibrated robot localization';
+  $('apriltag-panel').hidden = isObject; $('object-panel').hidden = !isObject;
+  $('field-settings').hidden = isObject; $('object-geometry').hidden = !isObject;
+  $('mount-title').textContent = isObject ? 'Robot & target plane' : 'Robot & field';
+  $('preview-image').alt = isObject ? 'Camera preview with object boxes and selected targets' : 'Camera preview with AprilTag overlays';
+  for (const id of ['object-backend','object-limit','object-target-height','object-anchor','object-max-range','object-max-std','object-intake-x','object-intake-y','object-standoff']) $(id).disabled = !isObject;
   $('pipeline-enabled').checked = pipeline.enabled !== false;
   value('camera-source', camera.source); value('camera-backend', camera.backend || 'auto');
   const device = deviceForSource(camera.source);
@@ -109,6 +125,16 @@ function populatePipeline() {
   value('tag-decimate', tags.quad_decimate ?? 1); value('tag-margin', tags.min_decision_margin ?? 20);
   $('multitag').checked = tags.multitag !== false;
   for (const id of ['tag-mode','tag-backend','tag-size','tag-threads','tag-decimate','tag-margin','multitag']) $(id).disabled = pipeline.type !== 'apriltag';
+  value('object-backend', isObject ? tags.backend || 'contour' : 'contour');
+  value('object-task', tags.task || 'detect'); value('object-format', tags.output_format || 'yolov8_raw');
+  value('object-model', tags.model_path || ''); value('object-labels', (tags.labels || []).join('\n'));
+  const inputSize = Array.isArray(tags.input_size) ? tags.input_size : [tags.input_size || 640, tags.input_size || 640];
+  value('object-width', inputSize[0]); value('object-height', inputSize[1]);
+  value('object-confidence', tags.confidence_threshold ?? .35); value('object-limit', tags.max_detections ?? 16);
+  value('object-target-height', geometry.target_height_m); value('object-anchor', geometry.anchor || 'bbox_center');
+  value('object-max-range', geometry.max_range_m ?? 5); value('object-max-std', geometry.max_position_std_m ?? .3);
+  value('object-intake-x', geometry.intake_offset_m?.[0] ?? 0); value('object-intake-y', geometry.intake_offset_m?.[1] ?? 0);
+  value('object-standoff', geometry.approach_standoff_m ?? .1); updateObjectBackend();
   $('mount-measured').checked = pipeline.robot_to_camera != null; updateMountInputs();
   const translation = mount.translation_m || [0, 0, 0], rotation = mount.rotation_rpy_deg || [0, 0, 0];
   ['mount-x','mount-y','mount-z'].forEach((id, i) => value(id, translation[i]));
@@ -155,6 +181,18 @@ function collectSettings() {
   }
   p.camera.controls = controls;
   if (p.type === 'apriltag') p.settings = {...p.settings, mode: $('tag-mode').value, backend: $('tag-backend').value, detector_device: $('tag-device').value || 'cpu', tag_size_m: n('tag-size'), threads: n('tag-threads'), quad_decimate: n('tag-decimate'), min_decision_margin: n('tag-margin'), multitag: $('multitag').checked};
+  else {
+    p.settings = {...p.settings, backend: $('object-backend').value, max_detections: n('object-limit')};
+    if (['tensorrt', 'opencv_onnx'].includes(p.settings.backend)) Object.assign(p.settings, {
+      task: $('object-task').value, output_format: $('object-format').value,
+      model_path: $('object-model').value.trim(),
+      labels: $('object-labels').value.split(/[,\n]/).map(label => label.trim()).filter(Boolean),
+      input_size: [n('object-width'), n('object-height')], confidence_threshold: n('object-confidence')
+    });
+    p.geometry = {...p.geometry, target_height_m: $('object-target-height').value.trim() === '' ? null : n('object-target-height'),
+      anchor: $('object-anchor').value, max_range_m: n('object-max-range'), max_position_std_m: n('object-max-std'),
+      intake_offset_m: [n('object-intake-x'), n('object-intake-y')], approach_standoff_m: n('object-standoff')};
+  }
   p.robot_to_camera = $('mount-measured').checked ? {translation_m: ['mount-x','mount-y','mount-z'].map(n), rotation_rpy_deg: ['mount-roll','mount-pitch','mount-yaw'].map(n)} : null;
   p.preview = {...p.preview, rotation_deg: n('preview-rotation'), stream_fps: n('preview-fps'), stream_width: n('preview-width'), jpeg_quality: n('preview-quality')};
   return config;
@@ -191,20 +229,42 @@ $('camera-source').onchange = () => { const d = deviceForSource(/^\d+$/.test($('
 function updateStatus() {
   const status = state.status[state.selected];
   const connected = status?.connected === true;
+  const isObject = selectedPipeline()?.type !== 'apriltag';
   $('preview-label').textContent = connected ? (status.input_kind === 'synthetic' ? 'Synthetic preview' : 'Live') : (selectedPipeline()?.enabled === false ? 'Disabled' : 'Waiting for camera');
   $('preview-label').className = connected ? 'badge live' : 'badge';
   const backend = status?.backend;
-  $('backend-label').textContent = backend === 'native' ? (status.detector_device === 'cuda' ? 'CUDA / GPU' : 'C++ / CPU') : (backend || '—');
+  const objectBackends = {tensorrt: 'TensorRT / GPU', opencv_onnx: 'ONNX / CPU', contour: 'Shape baseline', hsv: 'Color baseline'};
+  $('backend-label').textContent = backend === 'native' ? (status.detector_device === 'cuda' ? 'CUDA / GPU' : 'C++ / CPU') : (objectBackends[backend] || backend || '—');
   const latency = status?.latency_ms;
   $('latency').replaceChildren(document.createTextNode(Number.isFinite(latency) && connected ? latency.toFixed(1) : '—'));
   const unit = document.createElement('small'); unit.textContent = ' ms'; $('latency').append(unit);
   $('target-count').textContent = connected ? status.detections?.length || 0 : 0;
+  $('target-count-label').textContent = isObject ? 'Visible objects' : 'Visible tags';
+  $('pose-label').textContent = isObject ? 'Object geometry' : 'Pose estimate';
+  $('object-selection').hidden = !isObject;
   $('frame-id').textContent = connected ? status.frame_id ?? '—' : '—';
   const localization = status?.localization || status?.field_pose || status?.robot_pose;
   const pose = connected && localization?.valid === true && localization?.field_to_camera;
   $('pose-state').textContent = !connected ? 'Awaiting data' : (pose ? (localization.field_to_robot ? 'Robot field pose available' : 'Camera field pose · mount not measured') : (status.detections?.some(d => d.pose_valid && d.camera_to_target) ? 'Camera-relative pose available' : 'No field pose'));
   $('pose-note').textContent = status?.error || status?.localization_error || localization?.invalid_reason?.replaceAll('_', ' ') || '3D uses matched calibration; multi-tag uses known field coordinates and the measured camera mounting transform.';
   $('frame-label').textContent = connected ? `Frame ${status.frame_id ?? '—'} · ${status.mode || 'unknown'} detection` : (status?.error || 'No frame received');
+  if (isObject) {
+    const objects = connected ? status?.objects : null;
+    const selected = objects?.valid === true && objects.selected_target?.valid === true ? objects.selected_target : null;
+    const position = selected?.translation_m;
+    const hasPosition = Array.isArray(position) && position.length === 3 && position.every(Number.isFinite) && Number.isFinite(selected?.range_xy_m);
+    const validCount = objects?.valid === true ? (objects.targets || []).filter(target => target.valid === true).length : 0;
+    $('pose-state').textContent = !connected ? 'Awaiting data' : validCount ? `${validCount} robot-relative target${validCount === 1 ? '' : 's'}` : '2D only · no valid range';
+    $('pose-note').textContent = status?.error || objects?.invalid_reason?.replaceAll('_', ' ') || (hasPosition
+      ? 'Target position is in the robot frame at capture time, without motion compensation.'
+      : 'Ranging needs matching intrinsics, a measured camera mount and target plane.');
+    $('object-selected').textContent = hasPosition ? `${selected.label || 'Object'} · track ${selected.track_id ?? objects.selected_track_id ?? '—'}` : 'None';
+    $('object-position').textContent = hasPosition
+      ? `X ${position[0].toFixed(2)} m forward · Y ${position[1].toFixed(2)} m left · range ${selected.range_xy_m.toFixed(2)} m${Number.isFinite(selected.uncertainty?.max_position_std_m) ? ` · uncertainty ${selected.uncertainty.max_position_std_m.toFixed(2)} m` : ''}`
+      : 'No current robot-relative target.';
+    const detectionLabel = {detect: 'box detection', segment: 'instance segmentation'}[status?.task || status?.mode] || 'object detection';
+    $('frame-label').textContent = connected ? `Frame ${status.frame_id ?? '—'} · ${detectionLabel}` : (status?.error || 'No frame received');
+  }
   $('raw-results').textContent = JSON.stringify(status || {}, null, 2);
   if (!connected) hideFrame();
 }

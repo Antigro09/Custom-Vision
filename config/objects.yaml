@@ -1,0 +1,51 @@
+# Dedicated object Jetson template; trained weights and real camera calibration required.
+# Existing AprilTag local.yaml remains unchanged. Do not enable generic COCO benchmark models on robot.
+networktables:
+  enabled: true
+  team: 1086
+  table: /CustomVision/jetson-objects
+  period_ms: 10
+max_frame_age_ms: 100
+dashboard: {enabled: true, host: 0.0.0.0, port: 5801, stream_fps: 10, stream_width: 640, jpeg_quality: 65}
+pipelines:
+  - name: intake_objects
+    type: object
+    enabled: true
+    # Example capture tuple only: replace with actual future color camera capabilities.
+    camera: {source: 0, backend: v4l2, fourcc: MJPG, width: 640, height: 480, fps: 30, controls: {}}
+    calibration: null
+    robot_to_camera: null
+    geometry:
+      target_height_m: null  # Measured ball-center height (radius if robot Z0 is floor); null =2Donly.
+      anchor: bbox_center
+      max_range_m: 5.0
+      max_position_std_m: 0.30
+      intake_offset_m: [0.0, 0.0]  # Replace with measured intake forward/left offset.
+      approach_standoff_m: 0.10
+      tracking_ttl_s: 0.10
+    settings:
+      backend: tensorrt
+      task: detect
+      output_format: yolo26_end2end
+      model_path: ../models/gamepiece.engine
+      labels: [game_piece]  # Must exactly match the trained model's class order.
+      input_size: [640, 640]
+      confidence_threshold: 0.35
+      max_detections: 16
+      max_masks: 8
+  - name: secondary_objects
+    type: object
+    enabled: false
+    camera: {source: 1, backend: v4l2, fourcc: MJPG, width: 640, height: 480, fps: 30, controls: {}}
+    calibration: null
+    robot_to_camera: null
+    geometry: {target_height_m: null, anchor: bbox_center, tracking_ttl_s: 0.10}
+    settings:
+      backend: tensorrt
+      task: detect
+      output_format: yolo26_end2end
+      model_path: ../models/gamepiece.engine
+      labels: [game_piece]
+      input_size: [640, 640]
+      confidence_threshold: 0.35
+      max_detections: 16

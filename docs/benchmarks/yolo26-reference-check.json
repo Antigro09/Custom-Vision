@@ -1,0 +1,83 @@
+{
+  "scope": "One COCO bus image, native PyTorch FP32 reference vs TensorRT FP16; decoder/export check, not team accuracy",
+  "ultralytics_version": "8.4.150",
+  "image_size": [
+    1280,
+    800
+  ],
+  "network_size": [
+    640,
+    640
+  ],
+  "reports": [
+    {
+      "task": "detect",
+      "model": "yolo26n",
+      "matched_detections": 5,
+      "comparisons": [
+        {
+          "class": "person",
+          "box_iou": 0.998765,
+          "confidence_difference": 0.000159
+        },
+        {
+          "class": "person",
+          "box_iou": 0.999157,
+          "confidence_difference": 0.00058
+        },
+        {
+          "class": "bus",
+          "box_iou": 0.998982,
+          "confidence_difference": 0.002238
+        },
+        {
+          "class": "person",
+          "box_iou": 0.999449,
+          "confidence_difference": 0.000253
+        },
+        {
+          "class": "person",
+          "box_iou": 0.999256,
+          "confidence_difference": 0.000172
+        }
+      ]
+    },
+    {
+      "task": "segment",
+      "model": "yolo26n-seg",
+      "matched_detections": 5,
+      "comparisons": [
+        {
+          "class": "person",
+          "box_iou": 0.998804,
+          "confidence_difference": 0.000659,
+          "bounded_contour_iou": 0.840599
+        },
+        {
+          "class": "bus",
+          "box_iou": 0.998299,
+          "confidence_difference": 0.000872,
+          "bounded_contour_iou": 0.92294
+        },
+        {
+          "class": "person",
+          "box_iou": 0.997343,
+          "confidence_difference": 0.000649,
+          "bounded_contour_iou": 0.83982
+        },
+        {
+          "class": "person",
+          "box_iou": 0.998049,
+          "confidence_difference": 0.000357,
+          "bounded_contour_iou": 0.894289
+        },
+        {
+          "class": "person",
+          "box_iou": 0.997768,
+          "confidence_difference": 0.002496,
+          "bounded_contour_iou": 0.851536
+        }
+      ]
+    }
+  ]
+}

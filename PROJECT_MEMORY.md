@@ -47,11 +47,15 @@ Current development scope (user's follow-up on 2026-09-13):
   a headless option. Follow familiar PhotonVision/ WPILib concepts, with an
   explicitly documented custom NT4 contract.
 - Future robot code is Java; user will request it after testing. Do not implement
-  robot Java or autonomous motion during the current AprilTag phase.
-- Object work is now **brainstorm only**. Preserve existing code but do not add
-  detection, training, ranging or tracking until the user approves the proposal.
-  Proposed fixed downward-facing color camera projects detections onto a known
-  floor/ball-center plane, with mounting calibration, uncertainty and tracking.
+  robot Java or autonomous motion until requested.
+- User approved full object-pipeline implementation in the latest follow-up:
+  YOLO26 likely fine-tuned later, bounding boxes versus instance segmentation,
+  calibrated ranging/tracking and NT4 output. Intake camera will face downward.
+  Implement both box and segmentation paths; compare actual Jetson latency.
+  No team dataset or trained game-piece weights exist yet. Java remains deferred.
+- ROS decision: current CUDA detector uses NVIDIA cuAprilTags from Isaac ROS
+  directly, without a ROS runtime. Keep it unless measured benefits justify a
+  ROS/NITROS graph; ROS itself does not automatically accelerate kernels.
 - Dependencies belong in project .venv/private builds. Python 3.10 is sufficient
   for the implemented NT4 runtime; installing 3.11 is authorized if later needed.
 
@@ -62,7 +66,25 @@ NT4 schema 2 with synchronized host-read times and stale invalidation. Default
 browser port 5801 avoids existing PhotonVision on 5800. No real intrinsic calibration,
 measured mount, confirmed field layout or trained game-piece model is bundled.
 
-The initial setup had 84 passing tests; the expanded validation and actual measured
-compute results are recorded in docs/SETUP_REPORT.md and docs/PERFORMANCE.md.
+Object implementation now supports YOLO26 NMS-free detection and instance
+segmentation plus compatible raw outputs, persistent TensorRT10 CUDA buffers,
+calibrated plane ranging with uncertainty rejection, brief tracking/current-frame
+selection, intake approach displacement, browser controls and compact NT4 data.
+Targets use WPILib robot coordinates at capture time; no motion compensation or
+obstacle-checked autonomous path is claimed. Canonical metric targets on the wire
+are objects.targets, selected by selected_track_id. Signed target-plane Z must
+share the measured robot origin; zero means floor only if that origin is on floor.
+Use config/objects.yaml for the future dedicated object Jetson. Its camera mode
+and offsets are placeholders and its required trained engine is not supplied.
+Ultralytics 8.4.150 training/export tools use separate ignored .venv-export;
+COCO benchmark models under models/benchmark are for speed/contract testing only.
+The project contains training/export scripts, but no team fine-tuning occurred.
+
+The current object/AprilTag suite passed 326 tests on this Jetson. Actual two-worker
+YOLO26n at 640x640 compute: median 16.674 ms / p95 19.491 ms, about 59 FPS per camera;
+YOLO26n-seg at 640x640 with 5 masks: 23.577 / 32.723 ms, about 42 FPS per camera. These exclude
+camera transport/decode, metric geometry and robot/NT costs. Generic COCO models
+matched upstream boxes on one test image; this is not team accuracy. Recommend
+boxes first. Detailed methods/results are in docs/SETUP_REPORT.md and docs/PERFORMANCE.md.
 Physical cameras remain absent. User service installed but disabled; unattended
 boot and on-robot latency/accuracy remain unverified. Do not claim live readiness.

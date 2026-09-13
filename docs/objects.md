@@ -1,10 +1,24 @@
 # Object detection for team 1086
 
-The current OV9281-class global-shutter Arducams are monochrome. The default
+The current OV9281-class global-shutter Arducams are monochrome. The optional
 `contour` backend finds bright, approximately round **ball candidates**. It is a
 starting point for camera, targeting, and robot integration, and has no trained
 knowledge of a game piece. A white mark, light, or another round object can also
 be a candidate. The game and final object classes are not yet known.
+
+The implemented neural path supports YOLO26 boxes and instance segmentation,
+with calibrated robot-relative ranging, track IDs, current-target selection and
+NetworkTables output. Start from `config/objects.yaml` for a dedicated object
+Jetson with two cameras. It deliberately requires a real engine; its example
+camera mode, label, intake offsets and missing calibration are not deployment
+measurements. The normal AprilTag profile also has a disabled object entry for
+browser setup. No object model is silently activated on the robot.
+
+Use [the pinned training/export tools](yolo_exports.md) with your actual dataset,
+then configure [object geometry](object_geometry.md) and the model contract below.
+For a software-only demonstration, run `.venv/bin/python scripts/demo_objects.py`
+and open `http://127.0.0.1:5802`. That demo always disables NT and labels its input
+synthetic; it exercises geometry using rendered circles, not trained inference.
 
 ## Monochrome candidate baseline
 
@@ -20,7 +34,7 @@ The object pipeline's `settings` mapping in `config/local.yaml` supports:
   "max_area_fraction": 0.25,
   "min_circularity": 0.55,
   "morphology_kernel": 3,
-  "max_detections": 100
+  "max_detections": 16
 }
 ```
 
@@ -68,13 +82,12 @@ CUDA runtime. It does not require PyTorch for inference. `opencv_onnx` is a
 CPU fallback for inspecting the same ONNX model; it is not the recommended
 performance backend for the Jetson.
 
-Supported models have exactly one static input `[1,3,H,W]` and one raw
-YOLOv8/YOLO11 detection output `[1,4+number_of_classes,N]`. Output coordinates
-are pixel-space center-x, center-y, width, height followed by per-class
-probabilities. Labels must exactly match training class order. The runtime
-performs confidence filtering and class-aware NMS. YOLOv5, embedded-NMS,
-end-to-end, segmentation, pose, dynamic, and batched output contracts are not
-supported. TensorRT I/O must be linear FP32 or FP16 device tensors.
+Supported models include YOLO26 end-to-end detection and instance segmentation,
+as well as compatible raw YOLOv8/YOLO11/YOLO26 outputs. Set `task: detect|segment`
+and `output_format: yolov8_raw|yolo26_end2end` explicitly. Labels must exactly match
+training class order; optional `allowed_class_ids` filters the published classes.
+See [YOLO export and runtime contracts](yolo_exports.md) for exact tensor shapes,
+segmentation limits, export settings and pinned-buffer execution.
 
 The input image is letterboxed with gray value 114, converted BGR to RGB,
 transposed to NCHW, and normalized to `[0,1]`. Monochrome images are replicated
@@ -83,7 +96,7 @@ deploying to the present cameras. Boxes are restored to the capture image
 coordinates using the actual resize and padding, clipped, and filtered.
 
 Export a **trained** `.pt` checkpoint on a training workstation with an
-Ultralytics version that supports YOLOv8/YOLO11:
+Ultralytics version that supports the selected model:
 
 ```bash
 yolo export model=best.pt format=onnx imgsz=640 batch=1 dynamic=False nms=False opset=17
@@ -107,22 +120,24 @@ Configure:
 ```json
 {
   "backend": "tensorrt",
+  "task": "detect",
+  "output_format": "yolo26_end2end",
   "model_path": "../models/game-piece.engine",
   "labels": ["ball"],
   "input_size": 640,
   "confidence_threshold": 0.35,
   "iou_threshold": 0.45,
-  "max_detections": 100
+  "max_detections": 16
 }
 ```
 
 `input_size` may also be `[width,height]` and must match the engine. Missing or
 unsupported model files fail explicitly. They never silently fall back to a
-different detector. TensorRT execution reuses device buffers and serializes
-calls through one context. Synchronous host/device copies keep buffer lifetime
-straightforward; benchmark on the actual camera resolution before setting a
-robot loop expectation. Up to 3,000 highest-scoring candidates enter NMS to
-bound CPU work.
+different detector. TensorRT execution reuses device and pinned host buffers and
+serializes calls through one context. Copies and GPU inference run asynchronously
+on a private stream, then synchronize before decoding. Benchmark on the actual
+camera resolution before setting a robot loop expectation. Only raw output uses
+NMS, with at most 3,000 candidates; YOLO26 end-to-end skips that step.
 
 The model export and runtime contracts follow the primary documentation for
 [Ultralytics export](https://docs.ultralytics.com/modes/export),
@@ -143,8 +158,10 @@ positive up. These are individual horizontal/vertical bearing angles from
 undistorted normalized image coordinates, not robot or field coordinates.
 They require `camera_matrix` (3x3), `dist_coeffs`, `width`, and `height` in the
 calibration JSON. Frame size must exactly match the calibration. Without
-calibration, angle fields are omitted. Camera mounting transforms, intake
-geometry, timestamps, and stale-target rejection belong in robot integration.
+calibration, angle fields are omitted. These describe the standalone detector API.
+The acquisition layer enriches detections with calibrated robot-relative geometry
+and explicit validity; those fields are separate from these legacy camera bearings.
+Use the NetworkTables contract for the complete published acquisition result.
 
 ## Collect a useful training dataset
 
@@ -177,8 +194,9 @@ calibrated bearings, letterbox inversion, per-class NMS, invalid model contracts
 RGB preprocessing, and JSON serialization. They do not establish real-game
 accuracy. Run the real GPU smoke test with
 `.venv/bin/python -m pytest tests/test_tensorrt_integration.py -q -rs`. It builds
-a tiny input-dependent TensorRT network with input `[1,3,32,32]` and output
-`[1,5,1]` in a temporary directory. It verifies actual device inference,
-host/device copies, buffer ownership, cleanup, model validation, and grayscale
-input through the object pipeline. It skips on hosts without TensorRT/CUDA.
+a set of tiny input-dependent TensorRT networks with input `[1,3,32,32]`, raw
+and end-to-end detections, plus segmentation prototypes in a temporary directory.
+It verifies actual FP32/FP16 device inference, host/device copies, independent
+two-camera buffers/streams, thread serialization, cleanup, output ordering, model
+validation, and grayscale input. It skips on hosts without TensorRT/CUDA.
 Its detections are explicitly synthetic and do not measure trained accuracy.

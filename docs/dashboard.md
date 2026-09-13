@@ -58,6 +58,39 @@ recall for both devices and when adjusting decimation or thread count. Synthetic
 input is explicitly labeled **Synthetic preview**, and the frame footer reports
 the running detection mode rather than an unapplied setting.
 
+## Object setup
+
+Selecting an object pipeline shows object settings and its target plane instead
+of AprilTag settings and field layout. Capture, intrinsic calibration upload,
+measured camera mount, and preview controls remain shared.
+
+Choose **TensorRT** for a trained GPU model or **OpenCV ONNX** for a trained CPU
+model. Enter the path to an existing model file on the Jetson; the browser does
+not upload model binaries. Set detection or segmentation, the exported output
+format (`yolov8_raw` or `yolo26_end2end`), labels in training class order, input
+width and height, confidence threshold, and maximum detections. Labels accept
+commas or newlines. These settings must match the exported model. No trained
+game-piece model is included. **Contour** and **HSV** are shape/color candidate
+baselines; their scores are circularity/color fill rather than trained model
+probabilities. Their existing detailed YAML settings are preserved when saving.
+
+For robot-relative ranging, upload matching intrinsics, measure the camera mount,
+and enter the selected anchor's **measured Z in the robot frame**. A blank
+height explicitly keeps results 2D only. Zero specifies the floor only when the
+robot origin lies on the floor; an elevated origin requires a negative floor Z.
+Choose box center/bottom or segmentation centroid/bottom to match that plane.
+Mask anchors require segmentation output, and masks/anchors are approximate.
+Use range and position-uncertainty limits to reject unreliable geometry. Intake
+offsets use robot +X forward and +Y left; the approach standoff is in meters.
+These are geometric outputs, not robot motion commands.
+
+Pipeline health shows the selected track, robot X/Y and horizontal range only
+for a valid current target. Coordinates describe the robot frame at capture
+time, without motion compensation. Invalid geometry or a disconnect clears
+the displayed selection and range. Preview draws object boxes, optional mask
+contours, track IDs, valid ranges and a green selected target. No field position
+is implied. As with AprilTags, all overlays are drawn before preview rotation.
+
 ## Stream and performance
 
 Preview dimensions, rate, JPEG quality, and rotation are independent of capture.

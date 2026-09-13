@@ -420,6 +420,52 @@ def test_nt4_round_trip_clears_all_target_topics(tmp_path):
         ntcore.NetworkTableInstance.destroy(server)
 
 
+def test_nt4_object_selection_round_trip_and_stale_clear(tmp_path):
+    ntcore = pytest.importorskip('ntcore')
+    server = ntcore.NetworkTableInstance.create()
+    publisher = Publisher({'enabled': False})
+    subscriptions = []
+    try:
+        port = unused_port()
+        server.startServer(str(tmp_path / 'objects-nt.json'), '127.0.0.1', 0, port)
+        publisher.instance = ntcore.NetworkTableInstance.create()
+        publisher.instance.setServer('127.0.0.1', port)
+        publisher.instance.startClient4('object-contract-test')
+        table = server.getTable('/CustomVision/intake_objects')
+        result = table.getStringTopic('result').subscribe('')
+        valid = table.getBooleanTopic('target_valid').subscribe(False)
+        track = table.getIntegerTopic('selected_track_id').subscribe(0)
+        position = table.getDoubleArrayTopic('selected_target_robot').subscribe([])
+        approach = table.getDoubleArrayTopic('approach_robot_xy').subscribe([])
+        subscriptions.extend([result, valid, track, position, approach])
+        assert wait_until(publisher.instance.isConnected)
+        target = {'valid':True,'observed':True,'track_id':8,'translation_m':[1.2,-.2,.05],
+                  'approach':{'translation_m':[.6,-.2,0]}}
+        data = payload()
+        data.update(pipeline='intake_objects', type='object',
+                    detections=[{'class_id':0,'robot_relative':target}],
+                    objects={'valid':True,'targets':[target],'selected_target':target,'selected_track_id':8})
+        publisher.publish(data)
+        assert wait_until(lambda: valid.get() and track.get()==8 and list(position.get())==[1.2,-.2,.05])
+        assert wait_until(lambda: list(approach.get())==[.6,-.2])
+        assert wait_until(lambda: bool(result.get()))
+        packet = json.loads(result.get())
+        assert packet['objects']['targets'][0]['track_id']==packet['objects']['selected_track_id']==8
+        assert packet['detections'][0]['robot_relative']=={'valid':True,'track_id':8}
+        assert 'selected_target' not in packet['objects']
+        # The watchdog emits no object extras when a camera stops producing fresh frames.
+        stale = payload(connected=False, detections=[])
+        stale.update(pipeline='intake_objects', type='object', error='No fresh frame within 100 ms')
+        publisher.publish(stale)
+        assert wait_until(lambda: not valid.get() and track.get()==0 and list(position.get())==[] and list(approach.get())==[])
+        assert wait_until(lambda: json.loads(result.get())['connected'] is False)
+    finally:
+        publisher.close()
+        for subscription in subscriptions: subscription.close()
+        server.stopServer()
+        ntcore.NetworkTableInstance.destroy(server)
+
+
 def test_uvc_aliases_share_one_reader_and_reject_conflicting_modes(monkeypatch):
     monkeypatch.setattr(app, 'make_detector', lambda *_: FakeDetector())
     config=base_config()

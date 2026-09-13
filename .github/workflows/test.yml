@@ -15,3 +15,4 @@ jobs:
       - run: VISION_PYTHON=$(which python) ./scripts/build_native.sh -DCUSTOM_VISION_CUDA_PREPROCESS=OFF -DCUSTOM_VISION_CUDA_APRILTAGS=OFF
       - run: python -m pytest -q
       - run: python scripts/smoke_test.py
+      - run: python scripts/smoke_objects.py

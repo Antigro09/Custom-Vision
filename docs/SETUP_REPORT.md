@@ -26,7 +26,8 @@ remains in Git history; this implementation follows the requested fresh start.
 
 ## Completed capabilities and validation
 
-**218 tests passed on the Jetson** after the expanded implementation. Tests cover:
+The AprilTag phase had **218 passing tests on the Jetson**. That coverage remains
+in the current expanded suite. Tests cover:
 
 - CPU/native and actual GPU detection of rendered tag36h11 patterns, all four
   rotations, GPU decimations 1–4, raw pixel corner recovery, distorted calibration,
@@ -61,6 +62,60 @@ small-tag recall, clock conversion and total camera-to-robot latency using real
 motion/lighting. Keep CPU/GPU choices and decimation tied to these measurements.
 
 The 12–24 ms total-latency target is not certified by synthetic compute results.
-No robot Java, autonomous movement, new object ranging/tracking, or trained
-object model is implemented in this phase. The object acquisition proposal is
-ready for the user's review in [OBJECT_ACQUISITION_PROPOSAL.md](OBJECT_ACQUISITION_PROPOSAL.md).
+Robot Java and autonomous movement remain deferred. Actual trained game-piece
+weights and physical camera validation still require the team's data.
+
+## Object implementation follow-up
+
+The user approved full object implementation after reviewing the proposal.
+The runtime now handles YOLO26 detection and instance segmentation, calibrated
+target-plane ranging with uncertainty rejection, brief track association,
+current-frame selection, intake-relative approach displacement, compact NT4
+object packets and typed selection topics. Object model/geometry controls and
+box/mask/selected-target overlays are available in the browser.
+
+The existing direct cuAprilTags integration remains. It uses NVIDIA's library
+distributed with Isaac ROS without adding ROS nodes or a ROS-to-NT bridge.
+See [the architecture decision](ROS_AND_OBJECT_DESIGN.md).
+
+Ultralytics 8.4.150 is installed only in `.venv-export` with automatic dependency
+installation disabled. Existing system PyTorch/CUDA/TensorRT remain unchanged.
+Training and static ONNX export scripts are provided; actual team training has
+not been run without a dataset. Official COCO YOLO26n detection and segmentation
+exports were generated at 640x640 for real TensorRT compatibility/performance
+checks. They retain their original labels and are not production game-piece models.
+
+Browser verification used the explicit synthetic object demo with NT disabled.
+Three known floor targets produced valid robot coordinates. Clearing target
+height preserved 2D boxes and removed metric selection; restoring the height
+restored ranging. Consecutive saves restarted workers successfully. Preview
+rotation and conditional TensorRT model fields were checked in the browser.
+
+The dedicated `config/objects.yaml` profile supports two cameras; it leaves
+calibration, measured mount and target height unset. Its enabled first camera
+requires a real engine before it passes initialization. The normal local profile
+keeps its existing AprilTag camera enabled and the new object entry disabled.
+
+The complete updated suite passed **326 tests in 55.64 seconds on this Jetson**,
+including actual FP32/FP16 TensorRT execution, input-dependent GPU outputs,
+independent camera contexts/streams, segmentation prototypes and buffer cleanup.
+It also covers geometry projection/uncertainty, signed plane heights, undefined
+bearings, tracking/freshness, exact FP16 normalization and one-ULP FP32 parity,
+export validation and benchmark worker-failure handling. All 8 browser-client
+JavaScript tests passed. A real local NT4 server/client round trip verified
+object selection, position, approach arrays, compact coherent JSON and stale
+clearing; this does not substitute for testing the eventual Java consumer.
+
+Both full YOLO26 models were compared against upstream PyTorch predictions on a
+COCO test image. Each matched all five detections, with minimum box IoU 0.997343;
+bounded mask outlines are explicitly approximate. Four final GPU benchmark runs
+cover one and two camera workers. See [PERFORMANCE.md](PERFORMANCE.md) for the
+recorded numbers and all excluded camera/robot costs.
+
+Final smoke checks passed: 10 frames each for 2D, single-tag PnP and MultiTag,
+plus 20 synthetic object frames (16 observed-target frames and 4 empty frames).
+Object positions matched the known rendered coordinates within 0.015 m, track IDs
+stayed stable across fresh consecutive frames, and target loss/shutdown cleared
+results. This tolerance belongs to an ideal synthetic fixture, not real-world
+accuracy. The production AprilTag profile passed initialization; shell/JavaScript
+syntax and Git whitespace checks passed.

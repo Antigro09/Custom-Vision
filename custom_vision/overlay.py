@@ -9,8 +9,8 @@ from .calibration import validate_calibration
 
 
 def annotate(frame: np.ndarray, detections: list[dict], calibration: dict | None = None,
-             tag_size_m: float = .1651) -> np.ndarray:
-    """Copy a captured frame and draw decoded polygons plus calibrated 3D boxes.
+             tag_size_m: float = .1651, objects: dict | None = None) -> np.ndarray:
+    """Copy a captured frame and draw tag poses or object target overlays.
 
     Call this in the preview worker after publication, only at preview FPS.
     The box projects toward the observer from the tag's visible face. The raw
@@ -61,4 +61,43 @@ def annotate(frame: np.ndarray, detections: list[dict], calibration: dict | None
                 cv2.line(result, tuple(projected[8]), tuple(projected[index]), color, 2, cv2.LINE_AA)
         except (KeyError, ValueError, cv2.error):
             continue
+    _draw_objects(result, detections, objects)
     return result
+
+
+def _draw_objects(result: np.ndarray, detections: list[dict], objects: dict | None) -> None:
+    """Draw original-frame boxes and optional approximate segmentation contours."""
+    objects = objects or {}
+    targets = {target.get("detection_index"): target for target in objects.get("targets", [])}
+    for index, detection in enumerate(detections):
+        try:
+            box = np.asarray(detection.get("bbox_xyxy", []), dtype=np.float64)
+            if box.shape != (4,) or not np.isfinite(box).all() or np.any(box[2:] <= box[:2]):
+                continue
+            target = detection.get("robot_relative") or targets.get(index, {})
+            track_id = target.get("track_id")
+            selected = (objects.get("valid") is True and target.get("valid") is True
+                        and track_id is not None and track_id == objects.get("selected_track_id"))
+            color = (80, 235, 130) if selected else (255, 180, 60)
+            box_pixels = np.clip(np.rint(box), -1e6, 1e6).astype(np.int32)
+            cv2.rectangle(result, tuple(box_pixels[:2]), tuple(box_pixels[2:]),
+                          color, 3 if selected else 2, cv2.LINE_AA)
+            segmentation = detection.get("segmentation") or {}
+            contour = np.asarray(segmentation.get("contour_px", []), dtype=np.float64)
+            if contour.ndim == 2 and contour.shape[1:] == (2,) and len(contour) >= 3 and np.isfinite(contour).all():
+                pixels = np.clip(np.rint(contour), -1e6, 1e6).astype(np.int32)
+                cv2.polylines(result, [pixels], True, color, 1, cv2.LINE_AA)
+            label = str(detection.get("label", "object"))[:80]
+            if track_id is not None:
+                label += f" #{track_id}"
+            distance = target.get("range_xy_m")
+            if objects.get("valid") is True and target.get("valid") is True and isinstance(distance, (int, float)) and np.isfinite(distance):
+                label += f" {distance:.2f}m"
+            if selected:
+                label += " selected"
+            x = max(0, min(result.shape[1] - 1, int(box_pixels[0])))
+            y = max(14, min(result.shape[0] - 1, int(box_pixels[1]) - 6))
+            cv2.putText(result, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, .45,
+                        color, 1, cv2.LINE_AA)
+        except (TypeError, ValueError, cv2.error):
+            continue

@@ -1,0 +1,53 @@
+{
+  "compute_only": true,
+  "excludes": [
+    "exposure",
+    "camera transport",
+    "camera decode",
+    "metric geometry",
+    "NT transport",
+    "robot receipt"
+  ],
+  "model": "yolo26n-seg.engine",
+  "model_sha256": "a29860cecd8c410c7ebbe419e3e910a56dd7f6645bab3874eebd44f2330b1288",
+  "task": "segment",
+  "model_scope": "COCO pretrained benchmark if using bundled benchmark weights; never proof of game-piece accuracy",
+  "image_sha256": "c02019c4979c191eb739ddd944445ef408dad5679acab6fd520ef9d434bfbc63",
+  "image_size": [
+    1280,
+    800
+  ],
+  "network_size": [
+    640,
+    640
+  ],
+  "cameras": 2,
+  "frames_per_camera": 300,
+  "warmup_per_camera": 30,
+  "p50_ms": 23.577,
+  "p95_ms": 32.723,
+  "p99_ms": 34.774,
+  "max_ms": 35.827,
+  "per_camera_fps": [
+    41.87,
+    41.52
+  ],
+  "detections_per_frame_range": [
+    5,
+    5
+  ],
+  "masks_per_frame_range": [
+    5,
+    5
+  ],
+  "median_stages_ms": {
+    "preprocess_ms": 3.721,
+    "inference_ms": 12.734,
+    "decode_ms": 7.303,
+    "total_ms": 23.521
+  },
+  "first_warmup_ms": [
+    96.763,
+    97.268
+  ]
+}

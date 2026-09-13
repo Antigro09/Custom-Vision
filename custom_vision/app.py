@@ -63,7 +63,11 @@ def make_detector(cfg, config):
         detector.localization=localizer
         return detector
     from .objects import ObjectPipeline
-    return ObjectPipeline(cfg['settings'],cfg.get('calibration_data'))
+    from .object_geometry import ObjectGeometry
+    geometry=ObjectGeometry(cfg.get('geometry',{}),cfg.get('calibration_data'),cfg.get('robot_to_camera'))
+    detector=ObjectPipeline(cfg['settings'],cfg.get('calibration_data'))
+    detector.geometry=geometry
+    return detector
 
 
 def camera_settings_identity(settings):
@@ -135,7 +139,7 @@ class Runtime:
             def renderer(payload,frame):
                 from .overlay import annotate
                 cfg=by_name[payload['pipeline']]
-                return annotate(frame,payload['detections'],cfg.get('calibration_data'),cfg['settings'].get('tag_size_m',.1651))
+                return annotate(frame,payload['detections'],cfg.get('calibration_data'),cfg['settings'].get('tag_size_m',.1651),objects=payload.get('objects'))
             self.dashboard.set_renderer(renderer)
 
     def request_restart(self):
@@ -172,8 +176,9 @@ class Runtime:
                 frame=None
                 extras=None
             payload={'schema_version':2,'boot_id':getattr(self,'boot_id','test'),'pipeline':cfg['name'],'type':cfg['type'],
-                     'mode':cfg.get('settings',{}).get('mode','3d'),'backend':cfg.get('settings',{}).get('backend','pupil'),
-                     'detector_device':cfg.get('settings',{}).get('detector_device','cpu'),
+                     'mode':cfg.get('settings',{}).get('mode','3d') if cfg['type']=='apriltag' else cfg.get('settings',{}).get('task','detect'),
+                     'backend':cfg.get('settings',{}).get('backend','pupil' if cfg['type']=='apriltag' else 'contour'),
+                     'detector_device':('cuda' if cfg.get('settings',{}).get('backend')=='tensorrt' else 'cpu') if cfg['type']=='object' else cfg.get('settings',{}).get('detector_device','cpu'),
                      'input_kind':cfg.get('input_kind','camera'),'connected':error is None,'frame_id':frame_id,'capture_monotonic_us':int(captured*1e6),
                      'publish_unix_us':time.time_ns()//1000,'latency_ms':max(0.,(now-captured)*1000),
                      'timestamp_source':'host_frame_read_complete',
@@ -186,6 +191,7 @@ class Runtime:
     def camera_worker(self,group):
         cap=None
         count=frame_id=0
+        geometry_capture={}
         max_age=self.config.get('max_frame_age_ms',500)
         try:
             while not self.stop.is_set() and (not self.max_frames or count<self.max_frames):
@@ -206,6 +212,16 @@ class Runtime:
                                 enrichment=detector.localization.enrich(detections,frame.shape)
                                 detections=enrichment['detections']
                                 extras['localization']=enrichment['localization']
+                            if hasattr(detector,'geometry'):
+                                previous_capture=geometry_capture.get(cfg['name'])
+                                if previous_capture is not None and (captured-previous_capture)*1000>max_age:
+                                    detector.geometry.reset()
+                                if (detector_end-captured)*1000 <= max_age:
+                                    enrichment=detector.geometry.enrich(detections,frame.shape,captured)
+                                    detections=enrichment['detections']
+                                    extras['objects']=enrichment['objects']
+                                geometry_capture[cfg['name']]=captured
+                                extras['inference_timings']=getattr(detector,'last_timings',{})
                             finished=time.monotonic()
                             with self.lock:
                                 state=self.states[cfg['name']]
@@ -219,11 +235,13 @@ class Runtime:
                                           fps=fps,dropped_frames=getattr(cap,'dropped_frames',0),
                                           native_timings=getattr(detector,'last_timings',{}))
                             if (finished-captured)*1000>max_age:
+                                if hasattr(detector,'geometry'): detector.geometry.reset()
                                 self.emit(cfg,frame_id,captured,[],error=f'Frame exceeded {max_age:g} ms age limit')
                             else:
                                 self.emit(cfg,frame_id,captured,detections,frame=frame,extras=extras)
                         except Exception as exc:
                             self.had_error=True
+                            if hasattr(detector,'geometry'): detector.geometry.reset()
                             LOG.exception('Pipeline %s failed',cfg['name'])
                             with self.lock: self.states[cfg['name']].update(last_frame=started,frame_id=frame_id,failed=True)
                             self.emit(cfg,frame_id,captured,[],error=str(exc))
@@ -232,7 +250,9 @@ class Runtime:
                 except (RuntimeError,ValueError,TypeError,cv2.error,OSError) as exc:
                     self.had_error=True
                     LOG.warning('%s',exc)
-                    for cfg,_ in group: self.emit(cfg,frame_id,time.monotonic(),[],error=str(exc))
+                    for cfg,detector in group:
+                        if hasattr(detector,'geometry'): detector.geometry.reset()
+                        self.emit(cfg,frame_id,time.monotonic(),[],error=str(exc))
                     if cap is not None:
                         self.release_camera(cap)
                         cap=None

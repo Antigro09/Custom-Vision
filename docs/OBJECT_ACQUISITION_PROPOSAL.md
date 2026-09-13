@@ -1,8 +1,9 @@
-# Proposed floor-object acquisition — implementation deferred
+# Original floor-object acquisition proposal — implementation now approved
 
-The user requested brainstorming only for this phase. Existing object code remains
-unchanged. No new object training, ranging, tracking, planner or robot Java code
-has been implemented. Actual game pieces are undecided; small Wiffle balls are a
+This historical proposal was initially brainstorming only. The user subsequently
+approved object implementation: inference, segmentation, ranging, tracking and NT4
+are now implemented; see [current setup](objects.md). Robot Java, autonomous motion
+and actual team training remain pending the required robot/data inputs. Actual game pieces are undecided; small Wiffle balls are a
 hypothesis, and the future color camera specification is not known.
 
 ## Recommended geometry

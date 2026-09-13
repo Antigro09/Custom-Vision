@@ -23,3 +23,6 @@ logs/
 *.so
 build-native/
 config/.pending-*
+
+.venv-export/
+.cache/

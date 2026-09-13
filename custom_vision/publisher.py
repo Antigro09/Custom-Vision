@@ -12,6 +12,18 @@ def wire_values(value):
     return value
 
 
+def wire_packet(payload):
+    """One canonical metric target per object; compact references avoid triplication."""
+    result=wire_values(payload)
+    if isinstance(result.get('objects'),dict):
+        result['objects'].pop('selected_target',None)  # Resolve selected_track_id in targets.
+        for detection in result.get('detections',[]):
+            target=detection.get('robot_relative')
+            if isinstance(target,dict) and target.get('valid'):
+                detection['robot_relative']={'valid':True,'track_id':target['track_id']}
+    return result
+
+
 class Publisher:
     def __init__(self,config,stdout=False):
         self.stdout=stdout
@@ -42,7 +54,7 @@ class Publisher:
         else:
             payload['capture_server_us']=None
             payload['time_sync_valid']=False
-        encoded=json.dumps(wire_values(payload),allow_nan=False,separators=(',',':'))
+        encoded=json.dumps(wire_packet(payload),allow_nan=False,separators=(',',':'))
         with self.lock:
             if self.stdout: print(encoded,flush=True)
             if self.instance is None: return
@@ -52,18 +64,27 @@ class Publisher:
                 options=ntcore.PubSubOptions(periodic=self.period,sendAll=True,keepDuplicates=True)
                 types={'result':'String','connected':'Boolean','has_target':'Boolean','frame_id':'Integer','count':'Integer',
                        'latency_ms':'Double','tag_ids':'IntegerArray','pose_valid':'Boolean','field_to_robot':'DoubleArray',
-                       'used_tag_ids':'IntegerArray','capture_server_us':'Integer','time_sync_valid':'Boolean'}
+                       'used_tag_ids':'IntegerArray','capture_server_us':'Integer','time_sync_valid':'Boolean',
+                       'target_valid':'Boolean','selected_track_id':'Integer','selected_target_robot':'DoubleArray',
+                       'approach_robot_xy':'DoubleArray','object_track_ids':'IntegerArray'}
                 self.tables[name]={key:getattr(table,f'get{kind}Topic')(key).publish(options) for key,kind in types.items()}
             topics=self.tables[name]
             localization=payload.get('localization') or {}
             robot_pose=localization.get('field_to_robot')
             valid=bool(payload.get('connected') and localization.get('valid') and robot_pose)
+            objects=payload.get('objects') or {}
+            selected=objects.get('selected_target') or {}
+            target_valid=bool(payload.get('connected') and objects.get('valid') and selected.get('valid') and selected.get('observed'))
             values={'result':encoded,'connected':payload['connected'],'has_target':bool(payload['detections']),
                     'frame_id':payload['frame_id'],'count':len(payload['detections']),'latency_ms':payload['latency_ms'],
                     'tag_ids':[d['id'] for d in payload['detections'] if 'id' in d],'pose_valid':valid,
                     'field_to_robot':(robot_pose['translation_m']+robot_pose['rotation_quaternion_wxyz']) if valid else [],
                     'used_tag_ids':localization.get('used_tag_ids',[]) if valid else [],
-                    'capture_server_us':payload.get('capture_server_us') or 0,'time_sync_valid':payload['time_sync_valid']}
+                    'capture_server_us':payload.get('capture_server_us') or 0,'time_sync_valid':payload['time_sync_valid'],
+                    'target_valid':target_valid,'selected_track_id':selected.get('track_id',0) if target_valid else 0,
+                    'selected_target_robot':selected['translation_m'] if target_valid else [],
+                    'approach_robot_xy':selected['approach']['translation_m'][:2] if target_valid else [],
+                    'object_track_ids':[target['track_id'] for target in objects.get('targets',[]) if target.get('valid') and target.get('observed')] if payload.get('connected') else []}
             for key,value in values.items(): topics[key].set(value)
             self.instance.flush()  # NTCore rate-limits network flushes; receiver requests 10ms periodic too.
 

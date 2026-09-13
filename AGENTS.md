@@ -10,9 +10,11 @@ project authorization with unrelated destructive work, purchases, or messaging.
 
 The user explicitly requested a fresh implementation on 2026-09-13. The previous
 C++ and Python implementation is available in Git history; do not restore it as
-the active system. Maintain AprilTag and object capabilities, but the current phase authorizes new
-AprilTag work and object brainstorming only. Await the user’s approval before
-adding object ranging/tracking/training or Java robot integration.
+the active system. Maintain AprilTag and object capabilities. The user has now approved object
+inference, segmentation, calibrated ranging, tracking, and NetworkTables integration.
+The earlier object-brainstorming-only restriction is superseded. Robot Java and
+actual autonomous motion remain deferred. Do not invent fine-tuned weights or
+claim game-piece accuracy without actual team data and validation.
 
 Preserve NVIDIA's working system CUDA/TensorRT/PyTorch installation. Use `.venv`
 with system site packages; do not replace Jetson GPU libraries with generic CPU
