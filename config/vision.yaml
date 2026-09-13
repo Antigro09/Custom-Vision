@@ -1,0 +1,36 @@
+# Copy to local.yaml for actual hardware; paths are relative to this directory.
+# No field position is published until a separate field-layout/extrinsics solver exists.
+networktables:
+  enabled: true
+  team: 1086
+  server: null
+  table: /CustomVision
+dashboard:
+  enabled: true
+  host: 127.0.0.1
+  port: 5800
+pipelines:
+  - name: front_tags
+    type: apriltag
+    camera: {source: 0, backend: v4l2, fourcc: MJPG, width: 1280, height: 800, fps: 120}
+    calibration: null
+    settings:
+      tag_family: tag36h11
+      tag_size_m: 0.1651  # Verify actual printed black-border size for your field.
+      min_decision_margin: 30
+      threads: 2
+      quad_decimate: 1.0
+      max_reprojection_error_px: 3.0
+  - name: intake_objects
+    type: object
+    # Shares the mono camera for bench tests; change source when the color camera arrives.
+    camera: {source: 0, backend: v4l2, fourcc: MJPG, width: 1280, height: 800, fps: 120}
+    calibration: null
+    settings:
+      # Monochrome geometric candidates, NOT a trained game-piece classifier.
+      backend: contour
+      label: ball_candidate
+      threshold: 180
+      min_area_px: 150
+      min_circularity: 0.65
+      max_area_fraction: 0.4

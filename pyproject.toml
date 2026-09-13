@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frc-custom-vision"
+version = "0.1.0"
+description = "AprilTag and game-piece vision for NVIDIA Jetson and FRC"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24,<2", "PyYAML>=6,<7", "pupil-apriltags==1.0.4.post11", "pyntcore>=2023.4,<2025"]
+
+[project.optional-dependencies]
+desktop = ["opencv-contrib-python==4.10.0.84"]
+test = ["pytest>=8,<9"]
+
+[project.scripts]
+custom-vision = "custom_vision.app:main"
+
+[tool.setuptools.packages.find]
+include = ["custom_vision*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,179 +1,122 @@
-# apriltag_vision
+# Team 1086 Custom Vision
 
-A C++ AprilTag 36h11 detection pipeline for FRC-style vision applications using:
+Fresh AprilTag and object-detection software for the NVIDIA Jetson Orin Nano Super.
+The earlier implementation is retained in Git history. This project starts from
+scratch with a Python runtime, native AprilTag 3 detection, NT4 output, and a
+TensorRT backend for trained game-piece models.
 
-- **apriltag** (official C library, linked as `libapriltag`)
-- **OpenCV 4.x** (camera I/O, image processing, pose estimation, visualization)
-- **NTCore/CameraServer stack** (`ntcore`, `cscore`, `cameraserver`, `wpiutil`) for dashboard feed + NetworkTables
-- **nlohmann/json** (calibration parsing + optional debug stdout JSON)
-- **CMake**
+## What is ready
 
-The runtime keeps the hot path on raw camera frames for lower latency and better pose correctness:
+- AprilTag 36h11 IDs and pixels; camera-relative metric poses with valid calibration.
+- Monochrome ball-candidate detection for bench experiments, optional color/HSV
+  detection, and a GPU TensorRT backend for a future trained model.
+- Shared or separate UVC cameras, latest-frame capture, reconnect attempts, and
+  empty/invalid results when a camera fails or a processed frame is over 500ms old.
+- Read-only preview/status web page, NT4 robot output, calibration/data capture
+  tools, repeatable setup, tests, and a user service installer.
 
-`capture -> grayscale -> detect -> solvePnP -> annotate -> NetworkTables -> CameraServer stream`
+The game pieces are undecided. Small Wiffle balls are a possibility, not a confirmed
+specification. The supplied baseline finds geometric candidates; it is **not a
+trained ball classifier**. No trained FRC weights or real camera calibration are
+bundled. Physical cameras were not connected during initial setup.
 
-## Project Layout
+## Hardware configuration
 
-- `src/config.hpp`
-- `src/calibration.hpp`, `src/calibration.cpp`
-- `src/detector.hpp`, `src/detector.cpp`
-- `src/pose.hpp`, `src/pose.cpp`
-- `src/visualize.hpp`, `src/visualize.cpp`
-- `src/publisher.hpp`, `src/publisher.cpp`
-- `src/main.cpp`
-- `CMakeLists.txt`
+Team: **1086**. AprilTag camera: Swyft/Arducam OV9281-class, global-shutter monochrome,
+1280×800, USB 2.0 UVC **MJPEG only**, up to 120 FPS; 81° horizontal × 52° vertical FOV.
+The lens is fixed and described as factory calibrated/glued at a 5ft focus distance.
+A measured or vendor-provided intrinsic calibration is still required for distance.
+Color cameras for object detection will be added later.
 
-## Dependencies
+The default configuration requests MJPG at 1280×800/120 FPS. This is a requested
+capture mode, **not a measured pipeline throughput claim**. Two pipelines share
+camera 0 for initial bench work. Change the intake source when its camera arrives.
+Each distinct camera gets its own processing worker; pipelines sharing one camera
+run sequentially on its newest frame. JPEG decoding and AprilTags currently run on
+CPU; only the TensorRT neural backend uses the GPU.
 
-You need installed development packages for:
-
-- OpenCV
-- apriltag
-- ntcore
-- cscore
-- cameraserver
-- wpiutil
-- CMake
-
-### Ubuntu / Linux
-
-```bash
-sudo apt update
-sudo apt install -y \
-  build-essential cmake pkg-config \
-  libopencv-dev
-```
-
-Install apriltag and the NTCore/CameraServer packages using your platform's preferred packages or installer. If CMake cannot find them, set `CMAKE_PREFIX_PATH` or the specific `*_DIR` package path variables.
-
-### Windows
-
-- Install OpenCV and apriltag development packages that your compiler/CMake setup can find.
-- Install the NTCore/CameraServer C++ packages (`ntcore`, `cscore`, `cameraserver`, `wpiutil`) or point CMake at an existing allwpilib/native install that provides them.
-- Make sure `cmake` is on `PATH`.
-
-### macOS (Homebrew)
+## Start
 
 ```bash
-brew update
-brew install cmake pkg-config opencv apriltag
+cd /home/jetsonorin/Documents/Custom-Vision
+./scripts/setup_jetson.sh
+cp config/vision.yaml config/local.yaml  # first time only
+.venv/bin/python -m custom_vision.app --config config/local.yaml --check
+.venv/bin/python -m custom_vision.app --config config/local.yaml
 ```
 
-Install the NTCore/CameraServer packages separately, then point CMake at them if needed:
+Open [the local preview](http://127.0.0.1:5800). `/api/status` returns the latest
+results and `/frame/<pipeline-name>` returns its annotated JPEG. Preview refresh
+is 2Hz, independent of detection speed. Set `dashboard.host: 0.0.0.0` in the local
+configuration to make the preview accessible from the robot LAN.
+
+NetworkTables defaults to team 1086 at `/CustomVision`. Use `--no-nt` for isolated
+bench work. Use `--stdout-json` for per-result output and `--max-frames 100` for a
+bounded run. `--check` loads configuration/backends without opening cameras or
+contacting the robot; passing it does not certify physical readiness.
+
+## Verify without a camera
 
 ```bash
-cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/native-packages
+.venv/bin/python scripts/doctor.py
+.venv/bin/python -m pytest -q
+.venv/bin/python scripts/smoke_test.py
 ```
 
-`nlohmann/json` is found via `find_package` if installed, otherwise fetched automatically by CMake FetchContent.
+The smoke test generates tag 7 and a bright circular candidate, processes a video
+through both real pipelines, and checks shutdown clears results. Its images and
+calibration are synthetic and stored under ignored `data/smoke/`. GPU integration
+tests build a tiny synthetic TensorRT network when the Jetson libraries are present;
+these validate the backend plumbing, not game-piece recognition accuracy.
 
-## Build
+## Camera, calibration, and robot setup
+
+1. Connect the camera and run `v4l2-ctl --list-devices` and
+   `v4l2-ctl -d /dev/video0 --list-formats-ext`. Prefer stable
+   `/dev/v4l/by-id/...-video-index0` paths in `camera.source`.
+2. Ensure only one service owns each camera. A pre-existing PhotonVision service
+   was running during setup. Assign different cameras or stop it deliberately
+   before using its device with this runtime.
+3. Capture checkerboard views across the image at the operating resolution and
+   compute calibration using [the calibration guide](docs/apriltags.md). Set the
+   corresponding pipeline's `calibration` path in `config/local.yaml`.
+4. Verify tag black-border size, tag IDs, pose axes, reprojection error, distance,
+   and latency against measured targets. Camera pose is not field/robot pose.
+5. Connect the Jetson to the robot LAN and implement the consumer described in
+   [the NT4 contract](docs/networktables.md). Verify stale results are rejected on
+   robot, including when the Jetson loses power or network connection.
+6. Follow [object detection](docs/objects.md) when collecting game-piece data and
+   exporting a model. Build each TensorRT engine on this Jetson.
+
+## Service
 
 ```bash
-rm -rf build
-cmake -S . -B build -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH=/usr/local \
-  -DENABLE_NETWORKTABLES=ON
-cmake --build build -j$(nproc)
+./scripts/install_user_service.sh
+systemctl --user enable --now custom-vision  # after configuring connected cameras
+journalctl --user -u custom-vision -f
+systemctl --user stop custom-vision
 ```
 
-If CMake cannot find one or more native packages, configure with one of:
+The installer writes a user service and does not enable it automatically. A user
+service normally requires login. To run at boot without login, an administrator
+can enable lingering using `sudo loginctl enable-linger jetsonorin`. Passwordless
+sudo was unavailable during setup, so unattended boot operation has not been
+configured or verified.
 
-```bash
-cmake -B build -S . -DCMAKE_PREFIX_PATH=/path/to/native-packages
-cmake -B build -S . -Dntcore_DIR=/path/to/ntcore
-cmake -B build -S . -Dcscore_DIR=/path/to/cscore
-cmake -B build -S . -Dcameraserver_DIR=/path/to/cameraserver
-cmake -B build -S . -Dwpiutil_DIR=/path/to/wpiutil
-```
+## Dependencies and repository
 
-## Runtime Outputs
+Jetson setup preserves installed NVIDIA CUDA/TensorRT/PyTorch. The `.venv` uses
+system site packages for JetPack's native libraries. NumPy stays below 2 for the
+existing OpenCV stack. PyNTCore 2024.3.2.1 was already installed and provides NT4;
+current 2026 PyPI wheels require Python 3.11+, while this Jetson uses Python 3.10.
+The package allows the Python-3.10-compatible NT4 releases (2023.4–2024).
 
-- Local debug window via `cv::imshow` unless `--no-display` is set
-- CameraServer MJPEG stream with the configured camera name
-- NetworkTables topics under `/Vision/<camera_name>`
-- Optional per-frame JSON on stdout when `--stdout-json` is enabled
+`custom_vision/` is the runtime, `config/` holds examples, `scripts/` contains setup
+and calibration/data helpers, and `tests/` checks geometry, network behavior, and
+inference. Local calibration, datasets, engines, and credentials are ignored by
+Git. [PROJECT_MEMORY.md](PROJECT_MEMORY.md) records the user's choices and project
+context; [AGENTS.md](AGENTS.md) tells future coding sessions to read it.
 
-## Usage
-
-```bash
-./build/apriltag_vision --calibration calibration.json --camera 0 --tag-size 0.165 --team 1086
-```
-#### For no GUI
-```bash
-./build/apriltag_vision --calibration calibration.json --camera 0 --tag-size 0.165 --team 1086 --no-display
-```
-
-### CLI flags
-
-- `--camera <int>` camera index (default: `0`)
-- `--camera-name <name>` CameraServer and NT camera name (default: `camera0`)
-- `--tag-size <double>` tag size in meters (default: `0.1651`)
-- `--calibration <path>` calibration JSON file (**required**)
-- `--team <number>` connect NT client to a robot team number
-- `--nt-server <host>` connect NT client to a specific host, overrides `--team`
-- `--width <int>` requested camera width
-- `--height <int>` requested camera height
-- `--fps <int>` requested camera FPS
-- `--threads <int>` AprilTag detector thread count
-- `--quad-decimate <float>` AprilTag detector quad decimation
-- `--decision-margin <double>` minimum accepted decision margin
-- `--no-display` disable the local `cv::imshow` window only
-- `--stdout-json` print debug JSON to stdout in addition to NT publishing
-- `--record <output.mp4>` save the annotated output video
-
-If neither `--team` nor `--nt-server` is provided, the app starts a local NetworkTables server for desktop testing.
-
-### NetworkTables topics
-
-Under `/Vision/<camera_name>` the app publishes:
-
-- `connected`
-- `frame_id`
-- `timestamp_us`
-- `latency_ms`
-- `fps`
-- `tag_count`
-- `tag_ids`
-- `decision_margins`
-- `centers_xy`
-- `corners_xy`
-- `translations_m`
-- `rotations_rvec_rad`
-- `euler_deg`
-- `distances_m`
-
-Per-frame array topics keep the same tag ordering across all arrays.
-
-### Examples
-
-```bash
-./build/apriltag_vision --calibration calib.json
-./build/apriltag_vision --calibration calib.json --camera 1 --camera-name frontCam
-./build/apriltag_vision --calibration calib.json --team 6328
-./build/apriltag_vision --calibration calib.json --nt-server 10.0.0.2 --no-display
-./build/apriltag_vision --calibration calib.json --width 1280 --height 720 --fps 60 --threads 4 --quad-decimate 1.5
-./build/apriltag_vision --calibration calib.json --stdout-json --record output.mp4
-```
-
-## Calibration JSON format
-
-Expected fields:
-
-- `fx`, `fy`, `cx`, `cy` (numbers)
-- `dist_coeffs` (array of numbers, any length)
-
-Example:
-
-```json
-{
-  "fx": 912.4,
-  "fy": 910.8,
-  "cx": 640.0,
-  "cy": 360.0,
-  "dist_coeffs": [-0.112, 0.089, 0.0003, -0.0007, -0.021]
-}
-```
-
-If the file is missing, malformed, or missing required fields, the app exits with a descriptive error.
+Upstream references: [AprilTag 3](https://github.com/AprilRobotics/apriltag),
+[WPILib coprocessor vision](https://docs.wpilib.org/en/stable/docs/software/vision-processing/wpilibpi/using-a-coprocessor-for-vision-processing.html),
+[NVIDIA TensorRT Python API](https://docs.nvidia.com/deeplearning/tensorrt/10.13.3/inference-library/python-api-docs.html).
