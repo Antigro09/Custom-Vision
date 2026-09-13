@@ -36,11 +36,33 @@ Updated: 2026-09-13.
 - Passwordless sudo is unavailable. User-level dependency/service setup works;
   do not claim privileged installation or boot startup that has not happened.
 
-Current baseline: native AprilTag 3 via pupil-apriltags; NT4 robot publication;
-monochrome contour candidates for bench testing and a TensorRT backend for a
-future trained model. Calibration and physical validation remain required.
+Current development scope (user's follow-up on 2026-09-13):
+- Prioritize measured low latency, targeting roughly 12–24 ms camera-to-robot;
+  prefer C++ and useful CUDA acceleration. Do not claim superiority over
+  PhotonVision/Limelight without a fair measured comparison.
+- Plan two cameras per Jetson. Likely separate AprilTag and object Jetsons;
+  topology may change after measuring combined load.
+- AprilTags require 2D/3D, calibrated robot-relative targets, uploaded field
+  layouts, joint MultiTag poses, 3D box overlays, and browser camera setup with
+  a headless option. Follow familiar PhotonVision/ WPILib concepts, with an
+  explicitly documented custom NT4 contract.
+- Future robot code is Java; user will request it after testing. Do not implement
+  robot Java or autonomous motion during the current AprilTag phase.
+- Object work is now **brainstorm only**. Preserve existing code but do not add
+  detection, training, ranging or tracking until the user approves the proposal.
+  Proposed fixed downward-facing color camera projects detections onto a known
+  floor/ball-center plane, with mounting calibration, uncertainty and tracking.
+- Dependencies belong in project .venv/private builds. Python 3.10 is sufficient
+  for the implemented NT4 runtime; installing 3.11 is authorized if later needed.
 
-Setup verification on 2026-09-13: 84 tests passed including native AprilTag,
-local NT4, and real GPU execution of a synthetic TensorRT network. End-to-end
-synthetic video passed both pipelines. See docs/SETUP_REPORT.md. User service is
-installed but disabled, cameras absent; never claim live readiness until measured.
+Current implementation: C++17 AprilTag 3.4.5 detector and single-tag PnP,
+optional CUDA detector/preprocessing, joint calibrated MultiTag localization,
+latest-frame independent camera workers, demand-driven browser preview/config,
+NT4 schema 2 with synchronized host-read times and stale invalidation. Default
+browser port 5801 avoids existing PhotonVision on 5800. No real intrinsic calibration,
+measured mount, confirmed field layout or trained game-piece model is bundled.
+
+The initial setup had 84 passing tests; the expanded validation and actual measured
+compute results are recorded in docs/SETUP_REPORT.md and docs/PERFORMANCE.md.
+Physical cameras remain absent. User service installed but disabled; unattended
+boot and on-robot latency/accuracy remain unverified. Do not claim live readiness.

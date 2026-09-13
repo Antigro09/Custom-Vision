@@ -148,4 +148,4 @@ def test_invalid_settings_fail_before_native_detection(config):
 def test_invalid_frame_is_actionable():
     pipeline = AprilTagPipeline({"threads": 1})
     with pytest.raises(ValueError, match="uint8 BGR"):
-        pipeline.process(np.zeros((480, 640), dtype=np.uint8))
+        pipeline.process(np.zeros((480, 640, 4), dtype=np.uint8))

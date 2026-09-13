@@ -10,7 +10,9 @@ project authorization with unrelated destructive work, purchases, or messaging.
 
 The user explicitly requested a fresh implementation on 2026-09-13. The previous
 C++ and Python implementation is available in Git history; do not restore it as
-the active system. Maintain two pipelines: AprilTags and object detection.
+the active system. Maintain AprilTag and object capabilities, but the current phase authorizes new
+AprilTag work and object brainstorming only. Await the user’s approval before
+adding object ranging/tracking/training or Java robot integration.
 
 Preserve NVIDIA's working system CUDA/TensorRT/PyTorch installation. Use `.venv`
 with system site packages; do not replace Jetson GPU libraries with generic CPU

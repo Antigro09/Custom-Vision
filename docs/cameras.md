@@ -29,7 +29,15 @@ decode latency must still be measured. 120 FPS capture capability does not mean
 120 FPS pose or neural processing. Avoid saturating one USB2 hub with multiple
 high-rate cameras; validate each negotiated mode and throughput.
 
-When a color intake camera arrives, set its stable source path and its own width,
-height, fps, FOURCC, and calibration in the `intake_objects` entry. Different
-cameras process independently. HSV is available for color baselines; a labeled
-dataset plus TensorRT model is the path to robust game-piece recognition.
+The browser groups resolution, frame rate and format into actual driver-advertised
+mode tuples. Preview rotation is applied after detection and overlay projection;
+calibration always refers to the raw image. Changing camera mounting requires
+updated extrinsics even when the preview looks upright.
+
+The second tag camera has a disabled `rear_tags` profile. Enable it only after
+selecting its own stable source and calibration. Start with two detector threads
+per camera on this six-core Jetson and measure combined load.
+
+The future color camera and floor-pickup design are described in
+[the object proposal](OBJECT_ACQUISITION_PROPOSAL.md). New object work is paused;
+no game-piece class or camera specification is assumed.

@@ -48,6 +48,11 @@ class AprilTagPipeline:
     def __init__(self, config: dict, calibration: dict | None = None):
         if not isinstance(config, dict):
             raise ValueError("apriltags configuration must be an object")
+        self.mode = config.get("mode", "3d")
+        if self.mode not in ("2d", "3d"):
+            raise ValueError("AprilTag mode must be 2d or 3d")
+        self.known_tag_ids = set(config.get("known_tag_ids", []))
+        self.skip_single_when_multi = config.get("skip_single_when_multi", False)
         self.tag_size_m = _positive_float(config, "tag_size_m", 0.1651)
         self.min_decision_margin = _positive_float(config, "min_decision_margin", 30.0, zero_ok=True)
         self.max_reprojection_error_px = _positive_float(config, "max_reprojection_error_px", 3.0)
@@ -79,58 +84,29 @@ class AprilTagPipeline:
                                  refine_edges=1, debug=0)
 
     def _estimate_pose(self, corners: np.ndarray) -> dict:
-        """Choose a positive-depth planar solution and verify distorted reprojection."""
-        invalid = {"pose_valid": False, "pose_invalid_reason": "pnp_failed"}
-        try:
-            result = cv2.solvePnPGeneric(self._object_points, corners, self._camera_matrix,
-                                         self._dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)
-            if not result[0]:
-                return invalid
-            candidates = []
-            for rvec, tvec in zip(result[1], result[2]):
-                if not np.isfinite(rvec).all() or not np.isfinite(tvec).all():
-                    continue
-                # Refinement handles small corner noise near the frontal IPPE case.
-                ok, rvec, tvec = cv2.solvePnP(
-                    self._object_points, corners, self._camera_matrix, self._dist_coeffs,
-                    rvec.copy(), tvec.copy(), True, flags=cv2.SOLVEPNP_ITERATIVE)
-                if not ok or not np.isfinite(rvec).all() or not np.isfinite(tvec).all():
-                    continue
-                rotation, _ = cv2.Rodrigues(rvec)
-                transformed = (rotation @ self._object_points.T).T + tvec.reshape(3)
-                if np.any(transformed[:, 2] <= 0):
-                    continue
-                projected, _ = cv2.projectPoints(self._object_points, rvec, tvec,
-                                                  self._camera_matrix, self._dist_coeffs)
-                error = float(np.sqrt(np.mean(np.sum((projected.reshape(4, 2) - corners) ** 2, axis=1))))
-                if math.isfinite(error):
-                    candidates.append((error, rvec, tvec))
-            if not candidates:
-                return invalid
-            error, rvec, tvec = min(candidates, key=lambda candidate: candidate[0])
-            if error > self.max_reprojection_error_px:
-                return {"pose_valid": False, "pose_invalid_reason": "reprojection_error",
-                        "reprojection_error_px": error}
-            return {"pose_valid": True, "tvec_m": tvec.reshape(3).tolist(),
-                    "rvec_rad": rvec.reshape(3).tolist(),
-                    "distance_m": float(np.linalg.norm(tvec)), "reprojection_error_px": error}
-        except cv2.error:
-            return invalid
+        from .localization import estimate_tag_pose
+        return estimate_tag_pose(corners, self.tag_size_m, self._camera_matrix,
+                                 self._dist_coeffs, self.max_reprojection_error_px)
 
     def process(self, frame_bgr: np.ndarray) -> list[dict]:
         if (not isinstance(frame_bgr, np.ndarray) or frame_bgr.dtype != np.uint8
-                or frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3
+                or frame_bgr.ndim not in (2, 3) or (frame_bgr.ndim == 3 and frame_bgr.shape[2] != 3)
                 or min(frame_bgr.shape[:2]) < 8):
             raise ValueError("AprilTag input must be a nonempty uint8 BGR image, at least 8x8")
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        gray = frame_bgr if frame_bgr.ndim == 2 else cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         height, width = gray.shape
         pose_reason = None
-        if self.calibration is None:
+        if self.mode == "2d":
+            pose_reason = "2d_mode"
+        elif self.calibration is None:
             pose_reason = "no_calibration"
         elif (width, height) != (self.calibration["width"], self.calibration["height"]):
             pose_reason = "calibration_resolution_mismatch"
         results = []
-        for tag in self.detector.detect(np.ascontiguousarray(gray), estimate_tag_pose=False):
+        tags = self.detector.detect(np.ascontiguousarray(gray), estimate_tag_pose=False)
+        if self.skip_single_when_multi and len({tag.tag_id for tag in tags if tag.tag_id in self.known_tag_ids and tag.hamming <= self.max_hamming and tag.decision_margin >= self.min_decision_margin}) >= 2 and not pose_reason:
+            pose_reason = "deferred_multitag"
+        for tag in tags:
             margin = float(tag.decision_margin)
             hamming = int(tag.hamming)
             if not math.isfinite(margin) or margin < self.min_decision_margin or hamming > self.max_hamming:

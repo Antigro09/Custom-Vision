@@ -1,52 +1,66 @@
-# Jetson setup verification — 2026-09-13
+# Jetson setup and implementation verification — 2026-09-13
 
-Fresh implementation for FRC team 1086 in
-`/home/jetsonorin/Documents/Custom-Vision`; previous source is preserved in Git
-history at `681280be594f3ccd642e36874a21008722be0c4b`.
+FRC team 1086, `/home/jetsonorin/Documents/Custom-Vision`, repository
+[Antigro09/Custom-Vision](https://github.com/Antigro09/Custom-Vision). Earlier source
+remains in Git history; this implementation follows the requested fresh start.
 
-## Installed and observed
+## Installed and preserved
 
-- aarch64 Ubuntu 22.04.5, Python 3.10.12, L4T R36.4.7.
-- CUDA 12.6 and TensorRT 10.3 already installed; preserved unchanged.
-- MAXN_SUPER power mode already active; no clock/power/firmware changes made.
-- Existing PyTorch 2.3.0 reports CUDA available; runtime does not require it.
-- Project `.venv` with system site packages and editable `frc-custom-vision 0.1.0`.
-- Built pupil-apriltags 1.0.4.post11 natively for aarch64.
-- NumPy 1.26.4, OpenCV 4.10.0, PyYAML 6.0.2, NTCore 2024.3.2.1, pytest 8.4.2.
-- Python OpenCV is CPU-only and does not provide GStreamer in this installation.
-  UVC/V4L2 MJPEG works at the software interface level; no live camera was available.
+- Jetson Orin Nano Super 8 GB, aarch64 Ubuntu 22.04.5, Python 3.10.12, L4T 36.4.7.
+- Existing CUDA 12.6, TensorRT 10.3, PyTorch 2.3.0 and MAXN_SUPER preserved.
+- Project `.venv`, editable `frc-custom-vision 0.2.0`, NumPy 1.26.4,
+  Python OpenCV 4.10.0, PyYAML 6.0.2, NTCore 2024.3.2.1 and pytest 8.4.2.
+- C++17 release extension with private pinned AprilTag 3.4.5, pybind11 2.13.6,
+  existing native OpenCV 4.13.0-dev and actual CUDA preprocessing/detection support.
+- Optional NVIDIA cuAprilTags header/static archive from Isaac ROS 3.2, pinned,
+  hash-verified, licensed notices retained. No ROS install, JetPack replacement,
+  system AprilTag replacement, Python upgrade or global GPU wheel install.
+- Existing PhotonVision remains running on 5800. Custom Vision browser uses 5801.
 - User service installed at
   `/home/jetsonorin/.config/systemd/user/custom-vision.service`, disabled/stopped.
-  `config/local.yaml` created for machine-specific edits (ignored by Git).
-- Existing PhotonVision service left running. It must not compete for a camera.
-- No `/dev/video*` devices detected. No real calibration/dataset/model supplied.
-- User lingering is disabled and passwordless sudo unavailable. Unattended
-  boot operation is not configured or verified.
+- Ignored `config/local.yaml` holds this machine's profile. Only `front_tags`
+  enabled; `rear_tags` awaits a second physical camera. No invented calibration,
+  camera mount or season field layout is installed in the production profile.
+- No `/dev/video*` cameras were available. Passwordless sudo and user lingering
+  are unavailable; boot without login and locked clocks were not configured.
 
-## Validation completed
+## Completed capabilities and validation
 
-- **84 tests passed** on the Jetson, including actual CPU and GPU execution.
-- AprilTag tests detect actual rendered 36h11 patterns, rotate them, verify
-  corner ordering, perspective/distortion pose geometry, and invalid-pose cases.
-- Camera calibration tests recover known intrinsics from generated checkerboards.
-- Object tests cover monochrome round candidates, color ranges, bearings,
-  letterbox mapping, class-aware NMS, and rejected output contracts.
-- Two TensorRT integration tests build a tiny synthetic, input-dependent engine
-  on the GPU and verify CUDA transfers, inference output, cleanup and the complete
-  grayscale-to-neural-detection path. This is not a trained object model.
-- A real local NT4 client/server test verifies publication and stale-result clearing.
-- Runtime tests cover camera failures, slow frames, watchdog, shutdown, latest-frame
-  replacement, invalid configurations and preview clearing.
-- `scripts/smoke_test.py` processed 10 frames through each actual pipeline, found
-  tag 7 and the bright circular candidate, and verified shutdown clears targets.
-- Configuration initialization, Python compilation and shell syntax checks passed.
-- A bounded real-camera attempt returned failure cleanly because no camera was
-  attached. No physical FPS, pose accuracy, or robot-network claim is made.
+**218 tests passed on the Jetson** after the expanded implementation. Tests cover:
 
-## Next hardware-dependent work
+- CPU/native and actual GPU detection of rendered tag36h11 patterns, all four
+  rotations, GPU decimations 1–4, raw pixel corner recovery, distorted calibration,
+  single-tag pose, ambiguity, margin filtering, resolution changes and concurrency.
+- Joint MultiTag geometry, fixed field origin, robot mounting transforms, whole-tag
+  outliers, duplicate IDs, missing/mismatched calibration, and 2D pose invalidation.
+- Browser configuration/upload validation, camera control discovery and bounds,
+  demand-driven preview, rotation and stale-image clearing. Client regressions
+  cover token renewal after restart and runtime-versus-saved status display.
+- Actual browser checks: consecutive saves across worker restarts, 2D/3D mode,
+  synthetic labeling, robot field pose display and rotated 3D overlays.
+- Real local NT4 client/server publication, synchronized clock conversion,
+  coherent frame packets, invalid pose/topic clearing and wire numeric precision.
+- Runtime stale-frame watchdog, delayed-publication race, hung capture reader
+  ownership, UVC source aliases, restart refusal and safe shutdown.
+- Existing object/TensorRT regression coverage, including execution of a tiny
+  synthetic neural network on the GPU. This is not a trained game-piece model.
 
-Connect the OV9281-class camera, confirm its V4L2 MJPG mode, coordinate ownership
-with PhotonVision, calibrate it at 1280x800 and validate measured target distances.
-Then connect to the roboRIO and check the robot's own receipt-age timeout. Add the
-future color camera as the separate intake source. Once the game is known,
-collect/label actual images, train/validate the model and build its TensorRT engine.
+The updated video smoke test exercises 10 MJPEG frames each through 2D, single-tag
+PnP and MultiTag. It verifies IDs 7/12/20, expected robot position and clearing at
+shutdown. See ignored `data/smoke/summary.json`; all inputs/calibration are synthetic.
+Configuration initialization, shell syntax, JavaScript syntax and Git whitespace
+checks passed. Benchmark methodology/results are in [PERFORMANCE.md](PERFORMANCE.md),
+with seven recorded two-camera runs, each 600 measured frames.
+
+## Remaining physical validation
+
+Connect both cameras; confirm actual MJPG mode, exposure, USB throughput and
+ownership. Measure intrinsics at the raw operating resolution and camera mounts;
+upload the confirmed field layout. Validate distance, field pose, ambiguity,
+small-tag recall, clock conversion and total camera-to-robot latency using real
+motion/lighting. Keep CPU/GPU choices and decimation tied to these measurements.
+
+The 12–24 ms total-latency target is not certified by synthetic compute results.
+No robot Java, autonomous movement, new object ranging/tracking, or trained
+object model is implemented in this phase. The object acquisition proposal is
+ready for the user's review in [OBJECT_ACQUISITION_PROPOSAL.md](OBJECT_ACQUISITION_PROPOSAL.md).

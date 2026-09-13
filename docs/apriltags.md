@@ -1,10 +1,10 @@
 # AprilTags and camera calibration
 
-`custom_vision.apriltags.AprilTagPipeline` detects `tag36h11` and returns JSON-compatible dictionaries. The default tag side is 0.1651 meters (6.5 inches); verify the tag dimensions for the actual field and any practice print. Measure the side at the detected black/white border, not the outside of the surrounding white margin. [AprilRobotics describes tag sizing and pose conventions](https://github.com/AprilRobotics/apriltag#pose-estimation).
+The default `custom_vision.native_apriltags.NativeAprilTagPipeline` uses C++ detection and single-tag PnP; `custom_vision.apriltags.AprilTagPipeline` is the portable fallback. Both detect `tag36h11` and returns JSON-compatible dictionaries. The default tag side is 0.1651 meters (6.5 inches); verify the tag dimensions for the actual field and any practice print. Measure the side at the detected black/white border, not the outside of the surrounding white margin. [AprilRobotics describes tag sizing and pose conventions](https://github.com/AprilRobotics/apriltag#pose-estimation).
 
 Results contain `id`, `hamming`, `decision_margin`, `center`, `corners`, and `pose_valid`. Corner order preserves the tag's decoded orientation. A valid pose adds `tvec_m`, `rvec_rad`, `distance_m`, and `reprojection_error_px`. `rvec_rad` is an OpenCV Rodrigues rotation vector: its direction is the rotation axis and its magnitude is the angle. The pose transforms tag-local coordinates to the optical camera frame: x right, y down, z forward. Do not send this translation directly to a WPILib field pose; camera mounting transforms and the season's field layout are additional required inputs.
 
-`distance_m` is the Euclidean distance to the tag center. `tvec_m[2]` is forward depth. These values describe the camera, not the robot center. A single planar tag can have ambiguous orientation, especially head-on or far away; low reprojection error is a fit check, not an uncertainty guarantee. The implementation evaluates both IPPE square solutions, refines them, keeps positive-depth solutions, and returns the lowest distorted-pixel reprojection RMS. It does not implement multi-tag field localization. [OpenCV documents the solver and camera axes](https://docs.opencv.org/4.x/d5/d1f/calib3d_solvePnP.html).
+`distance_m` is the Euclidean distance to the tag center. `tvec_m[2]` is forward depth. These values describe the camera, not the robot center. A single planar tag can have ambiguous orientation, especially head-on or far away; low reprojection error is a fit check, not an uncertainty guarantee. The implementation evaluates both IPPE square solutions, refines them, keeps positive-depth solutions, and returns the lowest distorted-pixel reprojection RMS. The runtime adds joint multi-tag field localization and standardized WPILib transforms; see [localization](localization.md). [OpenCV documents the solver and camera axes](https://docs.opencv.org/4.x/d5/d1f/calib3d_solvePnP.html).
 
 ## Calibration
 
@@ -27,6 +27,6 @@ Missing calibration permits ID/pixel detection with `pose_valid: false` and `pos
 - `max_hamming`: default 0; corrected-bit detections are omitted unless explicitly allowed (0–2).
 - `max_reprojection_error_px`: default 3; a poor fit returns `pose_valid: false`, `pose_invalid_reason: reprojection_error`, and the error without translation or rotation.
 - `threads`: default 2; CPU detector worker count.
-- `quad_decimate`: default 1; a larger value trades detection range and corner accuracy for speed.
+- `quad_decimate`: default 2; a larger value trades detection range and corner accuracy for speed.
 
 Tune using representative motion, lighting, exposure, distances, and CPU load. The automated tests render genuine tag36h11 pixels, rotate tags through all four orientations, check distorted pose recovery, and calibrate rendered chessboards with known intrinsics.

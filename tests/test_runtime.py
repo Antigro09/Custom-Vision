@@ -260,6 +260,89 @@ def test_latest_capture_failure_blocks_buffered_stale_frame():
         capture.release()
 
 
+def test_hung_reader_refuses_release_and_runtime_never_reopens_device(monkeypatch):
+    entered = threading.Event()
+    unblock = threading.Event()
+    release_threads = []
+
+    class BlockingCamera:
+        def read(self):
+            entered.set()
+            unblock.wait(5)
+            return False, None
+
+        def release(self):
+            release_threads.append(threading.current_thread())
+
+    capture = LatestFrameCapture(BlockingCamera())
+    original_release = capture.release
+    # Keep the timeout path real while shortening only the shutdown join budget.
+    monkeypatch.setattr(capture, 'release', lambda: original_release(timeout=.01))
+    runtime = fake_runtime(max_frames=0)
+    runtime.restart_requested = True
+    opened = []
+
+    def open_camera(_):
+        opened.append(True)
+        return capture
+
+    monkeypatch.setattr(app, 'open_camera', open_camera)
+    try:
+        assert entered.wait(1)
+        result = runtime.run()
+        assert result == 1
+        assert opened == [True]
+        assert runtime.capture_shutdown_failed is True
+        assert runtime.stop.is_set()
+        assert runtime.restart_requested is False
+        assert capture.thread.is_alive()
+        assert release_threads == [], 'Only the blocked reader may release the device'
+        runtime.request_restart()
+        assert runtime.restart_requested is False
+    finally:
+        unblock.set()
+        assert original_release(timeout=1)
+    assert release_threads == [capture.thread]
+    assert runtime.publisher.closed
+    assert not any(item['detections'] for item in runtime.publisher.payloads)
+
+
+def test_delayed_emit_cannot_revive_target_cleared_by_watchdog(monkeypatch):
+    runtime = fake_runtime()
+    clock = [100.0]
+    waiting = threading.Event()
+    inner_lock = threading.RLock()
+
+    class ObservedLock:
+        def __enter__(self):
+            if threading.current_thread().name == 'delayed-emitter':
+                waiting.set()
+            inner_lock.acquire()
+        def __exit__(self, *_):
+            inner_lock.release()
+
+    runtime.lock = ObservedLock()
+    monkeypatch.setattr(app.time, 'monotonic', lambda: clock[0])
+    cfg = runtime.config['pipelines'][0]
+    stale_pose = {'localization': {'valid': True, 'field_to_robot': {'translation_m': [1, 2, 3]}}}
+    emitter = threading.Thread(target=lambda: runtime.emit(cfg, 3, 100., [{'id': 7}], extras=stale_pose),
+                               name='delayed-emitter')
+    with runtime.lock:
+        emitter.start()
+        assert waiting.wait(1)
+        clock[0] = 100.6
+        runtime.emit(cfg, 3, clock[0], [], error='No fresh frame within 500 ms')
+    emitter.join(timeout=1)
+    assert not emitter.is_alive()
+    assert len(runtime.publisher.payloads) == 2
+    for result in runtime.publisher.payloads:
+        assert result['connected'] is False
+        assert result['detections'] == []
+        assert 'localization' not in result
+    assert runtime.publisher.payloads[-1]['latency_ms'] == pytest.approx(600.)
+    assert runtime.publisher.payloads[-1]['error'] == 'Frame exceeded 500 ms age limit'
+
+
 def payload(*, connected=True, detections=None):
     return {"schema_version": 1, "pipeline": "front_tags", "type": "apriltag",
             "connected": connected, "frame_id": 1, "latency_ms": 5.0,
@@ -335,3 +418,21 @@ def test_nt4_round_trip_clears_all_target_topics(tmp_path):
             subscription.close()
         server.stopServer()
         ntcore.NetworkTableInstance.destroy(server)
+
+
+def test_uvc_aliases_share_one_reader_and_reject_conflicting_modes(monkeypatch):
+    monkeypatch.setattr(app, 'make_detector', lambda *_: FakeDetector())
+    config=base_config()
+    config.update(networktables={'enabled':False},dashboard={'enabled':False})
+    second=copy.deepcopy(config['pipelines'][0])
+    second.update(name='rear_tags')
+    second['camera']['source']='/dev/video0'
+    config['pipelines'].append(second)
+    app.validate_runtime(config)
+    runtime=app.Runtime(config)
+    assert len(runtime.groups)==1
+    assert len(next(iter(runtime.groups.values())))==2
+    runtime.publisher.close()
+    second['camera']['fps']=60
+    with pytest.raises(ValueError,match='identical camera settings'):
+        app.validate_runtime(config)

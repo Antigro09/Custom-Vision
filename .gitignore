@@ -20,3 +20,6 @@ logs/
 *.pt
 *.mp4
 *.avi
+*.so
+build-native/
+config/.pending-*

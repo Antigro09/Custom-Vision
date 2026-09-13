@@ -11,6 +11,7 @@ export CMAKE_BUILD_PARALLEL_LEVEL=2
 if ! .venv/bin/python -c 'import cv2; assert hasattr(cv2, "aruco")'; then
   .venv/bin/python -m pip install 'opencv-contrib-python==4.10.0.84'
 fi
-.venv/bin/python -m pip install -e '.[test]'
+.venv/bin/python -m pip install -e '.[test]' 'pybind11==2.13.6'
+./scripts/build_native.sh
 .venv/bin/python scripts/doctor.py
 .venv/bin/python -m custom_vision.app --check

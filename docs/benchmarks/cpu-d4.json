@@ -1,0 +1,50 @@
+{
+  "synthetic_compute_only": true,
+  "excludes": [
+    "exposure",
+    "USB transport",
+    "MJPEG decode",
+    "NT transport",
+    "robot receipt",
+    "field localization"
+  ],
+  "result": {
+    "scene": "structured",
+    "backend": "native",
+    "mode": "3d",
+    "preprocess": "cpu",
+    "detector_device": "cpu",
+    "min_white_black_diff": 5,
+    "includes_localization": false,
+    "quad_decimate": 4.0,
+    "threads_per_camera": 2,
+    "cameras": 2,
+    "frames_per_camera": 300,
+    "warmup_frames": 30,
+    "image_size": [
+      1280,
+      800
+    ],
+    "tag_ids": [
+      7,
+      12,
+      20,
+      24
+    ],
+    "p50_ms": 10.752,
+    "p95_ms": 15.44,
+    "p99_ms": 17.753,
+    "max_ms": 20.236,
+    "per_camera_fps": [
+      90.73,
+      88.48
+    ],
+    "first_warmup_ms": [
+      20.683,
+      40.99
+    ],
+    "correct_frames": 600,
+    "total_frames": 600,
+    "over_24_ms": 0
+  }
+}

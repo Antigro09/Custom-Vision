@@ -1,36 +1,57 @@
-# Copy to local.yaml for actual hardware; paths are relative to this directory.
-# No field position is published until a separate field-layout/extrinsics solver exists.
+# Team 1086 AprilTag Jetson profile. Copy to local.yaml for robot-specific edits.
+# Paths resolve relative to this YAML. Object implementation is frozen pending design approval.
 networktables:
   enabled: true
   team: 1086
   server: null
-  table: /CustomVision
+  table: /CustomVision/jetson-tags
+  period_ms: 10
+max_frame_age_ms: 100
+field_layout: null  # Upload a WPILib AprilTagFieldLayout through the setup page.
 dashboard:
   enabled: true
-  host: 127.0.0.1
-  port: 5800
+  host: 0.0.0.0
+  port: 5801  # PhotonVision on this host already owns 5800.
+  stream_fps: 10
+  stream_width: 640
+  jpeg_quality: 65
+  rotation_deg: 0
 pipelines:
   - name: front_tags
     type: apriltag
-    camera: {source: 0, backend: v4l2, fourcc: MJPG, width: 1280, height: 800, fps: 120}
+    enabled: true
+    camera:
+      source: 0
+      backend: v4l2
+      fourcc: MJPG
+      width: 1280
+      height: 800
+      fps: 120
+      controls: {}
     calibration: null
+    robot_to_camera: null  # Set measured translation_m and rotation_rpy_deg; never assume zero.
+    preview: {rotation_deg: 0}
     settings:
+      backend: native
+      mode: 3d
+      detector_device: cpu  # Select cuda in the UI after comparing recorded camera scenes.
+      preprocess: cpu  # CPU vs CUDA is benchmarked; GPU preprocessing is optional.
       tag_family: tag36h11
-      tag_size_m: 0.1651  # Verify actual printed black-border size for your field.
+      tag_size_m: 0.1651
       min_decision_margin: 30
       threads: 2
-      quad_decimate: 1.0
+      quad_decimate: 2.0
       max_reprojection_error_px: 3.0
-  - name: intake_objects
-    type: object
-    # Shares the mono camera for bench tests; change source when the color camera arrives.
-    camera: {source: 0, backend: v4l2, fourcc: MJPG, width: 1280, height: 800, fps: 120}
+      max_ambiguity: 0.2
+      multitag: true
+      always_single_tag: false
+      hfov_deg: 81
+      vfov_deg: 52
+  - name: rear_tags
+    type: apriltag
+    enabled: false  # Enable when the second physical camera is connected.
+    camera: {source: 1, backend: v4l2, fourcc: MJPG, width: 1280, height: 800, fps: 120, controls: {}}
     calibration: null
-    settings:
-      # Monochrome geometric candidates, NOT a trained game-piece classifier.
-      backend: contour
-      label: ball_candidate
-      threshold: 180
-      min_area_px: 150
-      min_circularity: 0.65
-      max_area_fraction: 0.4
+    robot_to_camera: null
+    preview: {rotation_deg: 0}
+    settings: {backend: native, mode: 3d, detector_device: cpu, preprocess: cpu, threads: 2, quad_decimate: 2.0, tag_family: tag36h11, tag_size_m: 0.1651, min_decision_margin: 30, max_reprojection_error_px: 3.0, max_ambiguity: 0.2, multitag: true, always_single_tag: false, hfov_deg: 81, vfov_deg: 52}

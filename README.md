@@ -1,122 +1,111 @@
 # Team 1086 Custom Vision
 
-Fresh AprilTag and object-detection software for the NVIDIA Jetson Orin Nano Super.
-The earlier implementation is retained in Git history. This project starts from
-scratch with a Python runtime, native AprilTag 3 detection, NT4 output, and a
-TensorRT backend for trained game-piece models.
+AprilTag aiming and robot localization for the Jetson Orin Nano Super, with a
+browser setup interface and NetworkTables 4 output. The detector and single-tag
+pose solver run in C++; Python manages cameras, configuration, joint localization
+and publication. Each camera has an independent worker that takes the newest
+frame. Preview rendering runs separately and only when requested.
 
-## What is ready
+## Implemented
 
-- AprilTag 36h11 IDs and pixels; camera-relative metric poses with valid calibration.
-- Monochrome ball-candidate detection for bench experiments, optional color/HSV
-  detection, and a GPU TensorRT backend for a future trained model.
-- Shared or separate UVC cameras, latest-frame capture, reconnect attempts, and
-  empty/invalid results when a camera fails or a processed frame is over 500ms old.
-- Read-only preview/status web page, NT4 robot output, calibration/data capture
-  tools, repeatable setup, tests, and a user service installer.
+- **2D:** tag IDs, corners, calibrated bearings (nominal FOV fallback explicitly marked).
+- **3D:** calibrated single-tag PnP, ambiguity and reprojection checks, camera- and
+  robot-relative tag transforms, and 3D box/axis preview overlays.
+- **MultiTag:** a joint solve using uploaded WPILib field coordinates, whole-tag
+  outlier rejection and field camera/robot poses. Robot poses require measured
+  camera mounting extrinsics. Individual PnP is skipped when a joint solve suffices.
+- **Browser setup:** camera mode tuples, driver-reported UVC controls, calibration
+  and field JSON uploads, measured mount, 2D/3D, decoder settings, and independent
+  preview resolution, FPS, quality and 90° rotation. Saving validates and restarts
+  the runtime; old targets are invalidated during reconfiguration.
+- **NT4:** coherent versioned JSON per frame, synchronized server timestamps when
+  available, pose convenience topics, boot identifiers and freshness watchdogs.
 
-The game pieces are undecided. Small Wiffle balls are a possibility, not a confirmed
-specification. The supplied baseline finds geometric candidates; it is **not a
-trained ball classifier**. No trained FRC weights or real camera calibration are
-bundled. Physical cameras were not connected during initial setup.
+The existing object backends are retained but disabled in this AprilTag profile.
+New object development is paused at the user's request; see the
+[floor-pickup proposal](docs/OBJECT_ACQUISITION_PROPOSAL.md).
 
-## Hardware configuration
-
-Team: **1086**. AprilTag camera: Swyft/Arducam OV9281-class, global-shutter monochrome,
-1280×800, USB 2.0 UVC **MJPEG only**, up to 120 FPS; 81° horizontal × 52° vertical FOV.
-The lens is fixed and described as factory calibrated/glued at a 5ft focus distance.
-A measured or vendor-provided intrinsic calibration is still required for distance.
-Color cameras for object detection will be added later.
-
-The default configuration requests MJPG at 1280×800/120 FPS. This is a requested
-capture mode, **not a measured pipeline throughput claim**. Two pipelines share
-camera 0 for initial bench work. Change the intake source when its camera arrives.
-Each distinct camera gets its own processing worker; pipelines sharing one camera
-run sequentially on its newest frame. JPEG decoding and AprilTags currently run on
-CPU; only the TensorRT neural backend uses the GPU.
-
-## Start
+## Start on this Jetson
 
 ```bash
 cd /home/jetsonorin/Documents/Custom-Vision
 ./scripts/setup_jetson.sh
-cp config/vision.yaml config/local.yaml  # first time only
+# First setup only, if local.yaml does not exist:
+cp -n config/vision.yaml config/local.yaml
 .venv/bin/python -m custom_vision.app --config config/local.yaml --check
 .venv/bin/python -m custom_vision.app --config config/local.yaml
 ```
 
-Open [the local preview](http://127.0.0.1:5800). `/api/status` returns the latest
-results and `/frame/<pipeline-name>` returns its annotated JPEG. Preview refresh
-is 2Hz, independent of detection speed. Set `dashboard.host: 0.0.0.0` in the local
-configuration to make the preview accessible from the robot LAN.
+Open `http://<jetson-address>:5801` from a laptop on the robot LAN. Port 5801 avoids
+this Jetson's existing PhotonVision on 5800. `--headless` disables the web server;
+`--no-nt` disables robot publication. `--check` validates configuration/backends
+without opening cameras or contacting the robot.
 
-NetworkTables defaults to team 1086 at `/CustomVision`. Use `--no-nt` for isolated
-bench work. Use `--stdout-json` for per-result output and `--max-frames 100` for a
-bounded run. `--check` loads configuration/backends without opening cameras or
-contacting the robot; passing it does not certify physical readiness.
+The default profile enables `front_tags`; `rear_tags` is ready but disabled until
+a second camera is attached. Set stable `/dev/v4l/by-id/...` sources, upload real
+calibration and field layout, and enter the measured robot-to-camera transform.
+The default NT root is `/CustomVision/jetson-tags`. Use different roots for different
+Jetsons. This is a documented custom protocol, not a PhotonLib drop-in replacement.
 
-## Verify without a camera
+## Hardware and speed
+
+The supplied OV9281-class Swyft/Arducam is monochrome, global shutter, USB 2 UVC,
+**MJPEG only**, 1280×800 up to 120 FPS, 81° × 52° FOV, with a fixed-focus lens.
+120 FPS is a camera specification, not verified pose throughput. Intrinsics cannot
+be inferred accurately from its factory focus description or nominal FOV.
+
+The C++ build privately pins AprilTag 3.4.5, uses CPU-specific release optimization,
+releases Python's GIL, avoids nested OpenCV thread pools, and provides optional
+CUDA preprocessing and CUDA detector acceleration. See [native build details](native/README.md)
+and [the performance report](docs/PERFORMANCE.md) for the measured paths and limits.
+CUDA must be selected explicitly and passes capability validation; it never silently
+falls back to CPU. Camera JPEG decoding remains on the CPU in the default capture path.
+
+The initial target is **12–24 ms camera-to-robot latency**, subject to measurement.
+No physical cameras were available during implementation. Synthetic compute timings
+exclude exposure, USB transport, capture decode, networking and robot scheduling.
+No claim of outperforming PhotonVision or Limelight is made without the same live
+scene, cameras, calibration, quality thresholds and timing method.
+
+## Verify and explore
 
 ```bash
-.venv/bin/python scripts/doctor.py
 .venv/bin/python -m pytest -q
 .venv/bin/python scripts/smoke_test.py
+.venv/bin/python scripts/benchmark_apriltags.py --backend native --cameras 2
+.venv/bin/python scripts/demo_apriltags.py --port 5802
 ```
 
-The smoke test generates tag 7 and a bright circular candidate, processes a video
-through both real pipelines, and checks shutdown clears results. Its images and
-calibration are synthetic and stored under ignored `data/smoke/`. GPU integration
-tests build a tiny synthetic TensorRT network when the Jetson libraries are present;
-these validate the backend plumbing, not game-piece recognition accuracy.
+The demo serves an explicitly synthetic three-tag field scene at
+`http://127.0.0.1:5802`, with NetworkTables disabled. Its files are under ignored
+`data/apriltag-demo/`; it does not replace production calibration. The smoke test
+checks 2D, single-tag and multi-tag localization through synthetic MJPEG video,
+including clearing all targets at shutdown. Desktop CI builds the CPU native module;
+Jetson tests additionally exercise available CUDA and TensorRT hardware.
 
-## Camera, calibration, and robot setup
+## Setup guides
 
-1. Connect the camera and run `v4l2-ctl --list-devices` and
-   `v4l2-ctl -d /dev/video0 --list-formats-ext`. Prefer stable
-   `/dev/v4l/by-id/...-video-index0` paths in `camera.source`.
-2. Ensure only one service owns each camera. A pre-existing PhotonVision service
-   was running during setup. Assign different cameras or stop it deliberately
-   before using its device with this runtime.
-3. Capture checkerboard views across the image at the operating resolution and
-   compute calibration using [the calibration guide](docs/apriltags.md). Set the
-   corresponding pipeline's `calibration` path in `config/local.yaml`.
-4. Verify tag black-border size, tag IDs, pose axes, reprojection error, distance,
-   and latency against measured targets. Camera pose is not field/robot pose.
-5. Connect the Jetson to the robot LAN and implement the consumer described in
-   [the NT4 contract](docs/networktables.md). Verify stale results are rejected on
-   robot, including when the Jetson loses power or network connection.
-6. Follow [object detection](docs/objects.md) when collecting game-piece data and
-   exporting a model. Build each TensorRT engine on this Jetson.
+- [Camera modes and exposure](docs/cameras.md)
+- [Intrinsic calibration](docs/apriltags.md)
+- [Field coordinates, mounting and MultiTag](docs/localization.md)
+- [Browser controls](docs/dashboard.md)
+- [NetworkTables contract and future robot integration](docs/networktables.md)
+- [Performance measurements and live acceptance procedure](docs/PERFORMANCE.md)
+- [Setup status](docs/SETUP_REPORT.md)
 
-## Service
+A user service is installed but disabled. After configuring connected cameras:
 
 ```bash
-./scripts/install_user_service.sh
-systemctl --user enable --now custom-vision  # after configuring connected cameras
+systemctl --user enable --now custom-vision
 journalctl --user -u custom-vision -f
-systemctl --user stop custom-vision
 ```
 
-The installer writes a user service and does not enable it automatically. A user
-service normally requires login. To run at boot without login, an administrator
-can enable lingering using `sudo loginctl enable-linger jetsonorin`. Passwordless
-sudo was unavailable during setup, so unattended boot operation has not been
-configured or verified.
+The service normally requires a login. Boot without login needs administrator-enabled
+lingering; that has not been configured. Keep one owner per camera. The existing
+PhotonVision service has been left running.
 
-## Dependencies and repository
-
-Jetson setup preserves installed NVIDIA CUDA/TensorRT/PyTorch. The `.venv` uses
-system site packages for JetPack's native libraries. NumPy stays below 2 for the
-existing OpenCV stack. PyNTCore 2024.3.2.1 was already installed and provides NT4;
-current 2026 PyPI wheels require Python 3.11+, while this Jetson uses Python 3.10.
-The package allows the Python-3.10-compatible NT4 releases (2023.4–2024).
-
-`custom_vision/` is the runtime, `config/` holds examples, `scripts/` contains setup
-and calibration/data helpers, and `tests/` checks geometry, network behavior, and
-inference. Local calibration, datasets, engines, and credentials are ignored by
-Git. [PROJECT_MEMORY.md](PROJECT_MEMORY.md) records the user's choices and project
-context; [AGENTS.md](AGENTS.md) tells future coding sessions to read it.
-
-Upstream references: [AprilTag 3](https://github.com/AprilRobotics/apriltag),
-[WPILib coprocessor vision](https://docs.wpilib.org/en/stable/docs/software/vision-processing/wpilibpi/using-a-coprocessor-for-vision-processing.html),
-[NVIDIA TensorRT Python API](https://docs.nvidia.com/deeplearning/tensorrt/10.13.3/inference-library/python-api-docs.html).
+Dependencies are isolated in `.venv` with access to JetPack system libraries. Setup
+preserves working CUDA/TensorRT/PyTorch. Python 3.10 and the installed compatible
+PyNTCore provide NT4; a Python upgrade is unnecessary for this implementation.
+Real calibration, datasets, model binaries, builds and credentials are ignored by Git.
+[PROJECT_MEMORY.md](PROJECT_MEMORY.md) preserves team decisions for future work.
