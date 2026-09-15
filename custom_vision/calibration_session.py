@@ -337,6 +337,7 @@ def capture_session(args):
                         novelty=args.novelty, max_sharpness=args.max_sharpness_px)
     session = Session(args.session, board, selector, {'camera': args.camera, 'video': args.video})
     reader = analyzer = cap = None
+    clock_context = None
     canceled = False
     try:
         if args.video:
@@ -346,6 +347,9 @@ def capture_session(args):
             fps = float(cap.get(cv2.CAP_PROP_FPS))
             if not math.isfinite(fps) or fps <= 0:
                 raise ValueError('Video has no usable FPS/timebase. Remux it with correct timestamps first.')
+            from .calibration_video import video_clock
+            clock_context = video_clock(args.video, getattr(args, 'timestamps', None))
+            timestamp_at, timestamp_source = clock_context.__enter__()
             frame_id = 0
             next_stamp = 0.
             auto = True
@@ -353,7 +357,7 @@ def capture_session(args):
                 ok, frame = cap.read()
                 if not ok:
                     break
-                stamp = frame_id / fps
+                stamp = timestamp_at(frame_id, fps)
                 if args.seconds and stamp > args.seconds:
                     break
                 if stamp >= next_stamp:
@@ -367,7 +371,7 @@ def capture_session(args):
                             break
                 frame_id += 1
             session.data['acquisition'] = {'video_frames_read': frame_id, 'reported_fps': fps,
-                                          'timestamp_source': 'video_frame_index_over_reported_fps'}
+                                          'timestamp_source': timestamp_source}
         else:
             reader = LiveReader(args.camera, (args.width, args.height), args.fps, args.fourcc,
                                 session.path, record=not args.no_record, max_seconds=args.seconds)
@@ -405,6 +409,8 @@ def capture_session(args):
                                                lossless_recording=not args.no_record)
         session.data['complete'] = True
     finally:
+        if clock_context is not None:
+            clock_context.__exit__(None, None, None)
         if reader is not None:
             reader.close()
         if analyzer is not None:
@@ -486,6 +492,7 @@ def main(argv=None):
             p.set_defaults(video=None)
         else:
             p.add_argument('--video', required=True)
+            p.add_argument('--timestamps', type=Path, help='Optional raw-timestamps.jsonl; auto-detected beside raw.avi')
             p.set_defaults(camera=None)
         add_solve_arguments(p)
     p = sub.add_parser('solve', help='Re-run mrcal on a saved session without a camera')

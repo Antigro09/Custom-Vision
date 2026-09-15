@@ -3,7 +3,7 @@ on:
   push:
     branches: [vision/guided-mrcal-calibration]
   pull_request:
-    paths: ['calibration.py', 'custom_vision/calibration_*.py', 'scripts/mrcal_*', 'scripts/install_calibration.sh', 'tests/test_guided_calibration.py', '.github/workflows/calibration.yml']
+    paths: ['calibration.py', 'custom_vision/calibration_*.py', 'scripts/install_calibration.sh', 'tests/test_guided_calibration.py', 'tests/test_calibration_*.py', '.github/workflows/calibration.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -31,12 +31,13 @@ jobs:
           mkdir -p calibration-results
           /usr/bin/python3 -c 'import mrcal, cv2, numpy, inspect; print(getattr(mrcal,"__version__","distro-package"), cv2.__version__, numpy.__version__); print(inspect.signature(mrcal.projection_uncertainty)); print(inspect.signature(mrcal.projection_diff)); print(inspect.signature(mrcal.ref_calibration_object))' | tee calibration-results/environment.txt
           dpkg-query -W mrcal python3-mrcal mrgingham >> calibration-results/environment.txt
+          git rev-parse HEAD > calibration-results/commit.txt
           mrcal-calibrate-cameras --help > calibration-results/solver-help.txt
           mrgingham --help > calibration-results/corner-help.txt
       - name: Calibration regressions and actual solver integration
         run: |
           set -o pipefail
-          xvfb-run -a /usr/bin/python3 -m pytest -q -ra tests/test_guided_calibration.py --basetemp="$RUNNER_TEMP/calibration-pytest" --junitxml=calibration-results/tests.xml 2>&1 | tee calibration-results/tests.log
+          xvfb-run -a /usr/bin/python3 -m pytest -q -ra tests/test_guided_calibration.py tests/test_calibration_video.py --basetemp="$RUNNER_TEMP/calibration-pytest" --junitxml=calibration-results/tests.xml 2>&1 | tee calibration-results/tests.log
       - name: Preserve solver diagnostics on failures
         if: ${{ !cancelled() }}
         run: |

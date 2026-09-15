@@ -26,3 +26,9 @@ config/.pending-*
 
 .venv-export/
 .cache/
+
+# Isolated calibration tools and local measurements (never commit camera data).
+.venv-calibration/
+calibration-results/
+*.cameramodel
+*.mkv

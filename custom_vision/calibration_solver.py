@@ -161,8 +161,10 @@ def pose_residuals(mrcal, model, points, observed):
     return result.fun.reshape(-1, 2)
 
 
-def validate_holdout(mrcal, model, views, indices):
-    points = mrcal.ref_calibration_object(**model.optimization_inputs()).reshape(-1, 3)
+def validate_holdout(mrcal, model, views, indices, board):
+    # Explicit arguments work with distro mrcal 2.1 as well as newer APIs.
+    points = mrcal.ref_calibration_object(board.cols, board.rows, board.square_size_m,
+                calobject_warp=model.optimization_inputs().get('calobject_warp')).reshape(-1, 3)
     errors, records = [], []
     for index in indices:
         observed = np.asarray(views[index]['corners'], np.float64)
@@ -283,7 +285,7 @@ def calibrate(args):
         for name, lensmodel in lensmodels.items():
             training, _ = solve_model(mrcal, session, data, views, train, lensmodel,
                                        output / name / 'training', focal, args.timeout)
-            validation = validate_holdout(mrcal, training, views, held)
+            validation = validate_holdout(mrcal, training, views, held, Board(**data['board']))
             full, modelpath = solve_model(mrcal, session, data, views, list(range(len(views))), lensmodel,
                                           output / name / 'full', focal, args.timeout)
             fitted[name] = full
