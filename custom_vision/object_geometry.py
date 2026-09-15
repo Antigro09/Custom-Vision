@@ -277,14 +277,19 @@ class ObjectGeometry:
         if len(self._tracks) > limit:
             recent = sorted(self._tracks.values(), key=lambda t: (-t.observed_s, -t.track_id))[:limit]
             self._tracks = {t.track_id: t for t in recent}
+        # These are two-scalar distances, not large linear-algebra operations.
+        # Group classes once and avoid allocating a NumPy array for every edge.
+        tracks_by_class = {}
+        for track_id, track in self._tracks.items():
+            tracks_by_class.setdefault(track.class_key, []).append(
+                (track_id, float(track.xy[0]), float(track.xy[1])))
         edges = []
+        gate = self.settings["tracking_gate_m"]
         for index, target in enumerate(targets):
-            xy = np.asarray(target["translation_m"][:2])
-            for track_id, track in self._tracks.items():
-                if track.class_key != (target["class_id"], target["label"]):
-                    continue
-                distance = float(np.linalg.norm(xy - track.xy))
-                if distance <= self.settings["tracking_gate_m"]:
+            x, y = map(float, target["translation_m"][:2])
+            for track_id, tx, ty in tracks_by_class.get((target["class_id"], target["label"]), ()):
+                distance = math.hypot(x - tx, y - ty)
+                if distance <= gate:
                     edges.append((distance, track_id, index))
         # Sorting the geometric edges makes associations independent of detector
         # confidence/order, except intrinsically ambiguous co-located detections.
