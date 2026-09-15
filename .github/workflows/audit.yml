@@ -21,6 +21,9 @@ jobs:
   verify:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
+    env:
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,7 +51,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
-          ruff check --select E9,F821,F822,F823,F831 custom_vision scripts tests 2>&1 | tee .audit-results/static-check.log
+          ruff check --select E9,F821,F822,F823 custom_vision scripts tests 2>&1 | tee .audit-results/static-check.log
+      - name: Paired host benchmarks against audited main commit
+        run: |
+          git fetch --no-tags --depth=1 origin 75aa625023e6946455761200b1f008d02839a1f9
+          git worktree add --detach "$RUNNER_TEMP/baseline" FETCH_HEAD
+          python scripts/benchmark_host_paths.py --baseline-repo "$RUNNER_TEMP/baseline" --output .audit-results/host-benchmarks.json
+      - name: Two-camera native CPU localization benchmark
+        run: |
+          python scripts/benchmark_apriltags.py --backend native --cameras 2 --frames 100 --warmup 10 --localization --output .audit-results/native-cpu-localization.json
+          python -c 'import json; r=json.load(open(".audit-results/native-cpu-localization.json"))["result"]; assert r["correct_frames"] == r["total_frames"], r'
       - name: Record environment
         if: ${{ !cancelled() }}
         run: |

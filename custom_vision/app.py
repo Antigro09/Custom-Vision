@@ -203,8 +203,18 @@ class Runtime:
                     if not ok or frame is None: raise RuntimeError('Camera read failed or input video reached its end')
                     if count==0: LOG.info('Camera %s delivering %dx%d',group[0][0]['camera']['source'],frame.shape[1],frame.shape[0])
                     for cfg,detector in group:
+                        if self.stop.is_set(): break
                         started=time.monotonic()
                         try:
+                            # A previous pipeline on this camera (or capture delay)
+                            # may have already consumed the entire freshness budget.
+                            # Do not enqueue inference that can only be discarded.
+                            if (started-captured)*1000>max_age:
+                                if hasattr(detector,'geometry'): detector.geometry.reset()
+                                with self.lock:
+                                    self.states[cfg['name']].update(last_frame=captured,frame_id=frame_id,failed=True)
+                                self.emit(cfg,frame_id,captured,[],error=f'Frame exceeded {max_age:g} ms age limit')
+                                continue
                             detections=detector.process(frame)
                             detector_end=time.monotonic()
                             extras={}

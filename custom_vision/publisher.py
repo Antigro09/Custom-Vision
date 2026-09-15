@@ -14,14 +14,23 @@ def wire_values(value):
 
 def wire_packet(payload):
     """One canonical metric target per object; compact references avoid triplication."""
-    result=wire_values(payload)
-    if isinstance(result.get('objects'),dict):
-        result['objects'].pop('selected_target',None)  # Resolve selected_track_id in targets.
-        for detection in result.get('detections',[]):
+    # Prune duplicated metric targets BEFORE recursively copying/rounding them.
+    # Copy every container we change: the dashboard and typed NT topics still
+    # consume the original full-precision targets and their shared references.
+    if not isinstance(payload.get('objects'),dict):
+        return wire_values(payload)
+    compact=dict(payload)
+    compact['objects']=dict(payload['objects'])
+    compact['objects'].pop('selected_target',None)  # Resolve selected_track_id in targets.
+    if 'detections' in payload:
+        detections=[]
+        for detection in payload['detections']:
             target=detection.get('robot_relative')
             if isinstance(target,dict) and target.get('valid'):
-                detection['robot_relative']={'valid':True,'track_id':target['track_id']}
-    return result
+                detection=dict(detection,robot_relative={'valid':True,'track_id':target['track_id']})
+            detections.append(detection)
+        compact['detections']=detections
+    return wire_values(compact)
 
 
 class Publisher:
@@ -42,7 +51,8 @@ class Publisher:
     def publish(self,payload):
         # Convert the host read-completion time to NT's synchronized server clock.
         # This is not hardware exposure time; a measured capture correction may be supplied.
-        import ntcore
+        if self.instance is not None:
+            import ntcore
         offset=self.instance.getServerTimeOffset() if self.instance else None
         if offset is not None and 'capture_monotonic_us' in payload and payload.get('connected'):
             nt_now=ntcore._now()
@@ -54,6 +64,10 @@ class Publisher:
         else:
             payload['capture_server_us']=None
             payload['time_sync_valid']=False
+        # The dashboard consumes the original payload, not this JSON. A fully
+        # disabled publisher must neither require NTCore nor spend time encoding.
+        if self.instance is None and not self.stdout:
+            return
         encoded=json.dumps(wire_packet(payload),allow_nan=False,separators=(',',':'))
         with self.lock:
             if self.stdout: print(encoded,flush=True)
