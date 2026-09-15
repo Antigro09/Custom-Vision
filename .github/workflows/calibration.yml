@@ -18,6 +18,7 @@ jobs:
     env:
       OPENBLAS_NUM_THREADS: 1
       OMP_NUM_THREADS: 1
+      VISION_TEST_GUI: 1
     steps:
       - uses: actions/checkout@v4
       - name: Install distro calibration packages without GPU libraries
@@ -26,15 +27,20 @@ jobs:
           sudo apt-get install -y mrcal python3-mrcal mrgingham python3-opencv python3-pytest python3-scipy python3-yaml xvfb
       - name: Record the real mrcal API and environment
         run: |
+          set -o pipefail
           mkdir -p calibration-results
-          /usr/bin/python3 -c 'import mrcal, cv2, numpy, inspect; print(mrcal.__version__, cv2.__version__, numpy.__version__); print(inspect.signature(mrcal.projection_uncertainty)); print(inspect.signature(mrcal.projection_diff)); print(inspect.signature(mrcal.ref_calibration_object))' | tee calibration-results/environment.txt
+          /usr/bin/python3 -c 'import mrcal, cv2, numpy, inspect; print(getattr(mrcal,"__version__","distro-package"), cv2.__version__, numpy.__version__); print(inspect.signature(mrcal.projection_uncertainty)); print(inspect.signature(mrcal.projection_diff)); print(inspect.signature(mrcal.ref_calibration_object))' | tee calibration-results/environment.txt
+          dpkg-query -W mrcal python3-mrcal mrgingham >> calibration-results/environment.txt
           mrcal-calibrate-cameras --help > calibration-results/solver-help.txt
           mrgingham --help > calibration-results/corner-help.txt
       - name: Calibration regressions and actual solver integration
         run: |
-          if test -f tests/test_guided_calibration.py; then
-            xvfb-run -a /usr/bin/python3 -m pytest -q tests/test_guided_calibration.py --junitxml=calibration-results/tests.xml
-          fi
+          set -o pipefail
+          xvfb-run -a /usr/bin/python3 -m pytest -q -ra tests/test_guided_calibration.py --basetemp="$RUNNER_TEMP/calibration-pytest" --junitxml=calibration-results/tests.xml 2>&1 | tee calibration-results/tests.log
+      - name: Preserve solver diagnostics on failures
+        if: ${{ !cancelled() }}
+        run: |
+          find "$RUNNER_TEMP/calibration-pytest" -type f \( -name 'solver.log' -o -name 'report.json' \) -print -exec cat {} \; > calibration-results/solver-diagnostics.txt || true
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
