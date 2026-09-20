@@ -131,6 +131,21 @@ limits. Preserve the [IPPE](IPPE_LICENSE.txt) and
 
 ## Timing and diagnostics
 
+Joint CUDA fitting replays its uploads, nine kernel stages and timing events
+through a CUDA graph. Each detector owns an eight-entry least-recently-used
+cache keyed by tag count, error threshold and iteration limit. Changing corners
+or field geometry still uploads fresh data on every call. A new or evicted key
+requires graph capture/instantiation before its first solve; warmed timings do
+not include that setup. Graphs are destroyed before their buffers and events.
+External event-record nodes preserve host completion and elapsed-time reporting.
+See NVIDIA's [CUDA graph documentation](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html)
+and [event-record API](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EVENT.html).
+
+The joint normal equations omit only zero padding beyond the current tile's
+actual corners. All hypotheses, observed corners, iterations, FP64 arithmetic,
+ambiguity handling and quality gates remain. Host localization reuses joint
+transforms and avoids small NumPy temporary arrays when formatting rotations.
+
 `native_capabilities()` identifies the compiled backends, versions, GPU count,
 and native OpenCV thread limit. OpenCV uses one thread, configured once when the
 extension loads; each CPU AprilTag detector defaults to two worker threads.

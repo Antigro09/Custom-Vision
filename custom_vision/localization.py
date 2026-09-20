@@ -55,14 +55,14 @@ def _quaternion_rotation(q: np.ndarray) -> np.ndarray:
 def _rotation_quaternion(rotation: np.ndarray) -> list[float]:
     # Rodrigues' axis-angle conversion remains stable around pi, unlike the
     # trace-only quaternion formula. Canonicalize sign for stable telemetry.
-    rvec = cv2.Rodrigues(rotation)[0].reshape(3)
-    angle = float(np.linalg.norm(rvec))
+    x, y, z = map(float, cv2.Rodrigues(rotation)[0].reshape(3))
+    angle = math.hypot(x, y, z)
     if angle < 1e-12:
         return [1., 0., 0., 0.]
-    q = np.r_[math.cos(angle / 2), rvec * (math.sin(angle / 2) / angle)]
-    if q[0] < 0:
-        q = -q
-    return q.tolist()
+    w = math.cos(angle / 2)
+    scale = math.sin(angle / 2) / angle
+    sign = -1. if w < 0 else 1.
+    return [sign*w, sign*scale*x, sign*scale*y, sign*scale*z]
 
 
 def _rpy_rotation(rpy_degrees: np.ndarray) -> np.ndarray:
@@ -96,7 +96,7 @@ def pose_dict(transform: np.ndarray) -> dict:
         yaw = math.atan2(-rotation[0, 1], rotation[1, 1])
     return {"translation_m": transform[:3, 3].tolist(),
             "rotation_quaternion_wxyz": _rotation_quaternion(rotation),
-            "rotation_rpy_deg": np.rad2deg([roll, pitch, yaw]).tolist(),
+            "rotation_rpy_deg": [math.degrees(roll), math.degrees(pitch), math.degrees(yaw)],
             "frame": "wpilib_nwu"}
 
 
@@ -311,10 +311,11 @@ class Localization:
                          area_pct=float(abs(cv2.contourArea(np.asarray(detection["corners"],
                                                                         dtype=np.float32)))) * 100 / (width * height))
 
-    def _relative(self, detection: dict) -> None:
+    def _relative(self, detection: dict, transform: np.ndarray | None = None) -> None:
         if not detection.get("pose_valid"):
             return
-        transform = _raw_to_camera_nwu(detection["rvec_rad"], detection["tvec_m"])
+        if transform is None:
+            transform = _raw_to_camera_nwu(detection["rvec_rad"], detection["tvec_m"])
         detection["camera_to_target"] = pose_dict(transform)
         detection["robot_to_target"] = (None if self.robot_to_camera is None else
                                           pose_dict(self.robot_to_camera @ transform))
@@ -505,8 +506,11 @@ class Localization:
         return result, field_to_camera if result['valid'] else None
 
     def _derive_target(self, detection: dict, field_to_camera: np.ndarray, ambiguity: float,
-                       gpu_error: float | None = None) -> None:
-        camera_to_target = invert_transform(field_to_camera) @ self.field_tags[detection["id"]]
+                       gpu_error: float | None = None,
+                       camera_to_field: np.ndarray | None = None) -> None:
+        if camera_to_field is None:
+            camera_to_field = invert_transform(field_to_camera)
+        camera_to_target = camera_to_field @ self.field_tags[detection["id"]]
         raw_rotation = CV_TO_NWU.T @ camera_to_target[:3, :3] @ RAW_FROM_WP_TAG.T
         raw_translation = CV_TO_NWU.T @ camera_to_target[:3, 3]
         rvec = cv2.Rodrigues(raw_rotation)[0]
@@ -526,7 +530,9 @@ class Localization:
                          distance_m=float(np.linalg.norm(raw_translation)), reprojection_error_px=error,
                          pose_ambiguity=ambiguity, pose_source="field_layout_multitag", pose_device=self.pose_device)
         detection.pop("pose_invalid_reason", None)
-        self._relative(detection)
+        # The joint transform already has the exact target rotation. Avoid a
+        # rotation-matrix -> Rodrigues -> rotation-matrix round trip per tag.
+        self._relative(detection, camera_to_target)
 
     def enrich(self, detections: list, image_shape) -> dict:
         self.single_pose_calls, self.single_pose_ms = 0, 0.
@@ -565,11 +571,13 @@ class Localization:
         if len(known) >= 2 and self.multitag:
             result, field_to_camera = self._multitag(known)
             result['pose_device'] = self.pose_device
+        camera_to_field = None if field_to_camera is None else invert_transform(field_to_camera)
         for detection in output:
             if (field_to_camera is not None and not self.always_single_tag and
                     detection["id"] in result["used_tag_ids"]):
                 self._derive_target(detection, field_to_camera, result["ambiguity"],
-                                     result.get('tag_reprojection_errors_px', {}).get(str(detection['id'])))
+                                     result.get('tag_reprojection_errors_px', {}).get(str(detection['id'])),
+                                     camera_to_field)
             else:
                 self._ensure_single(detection)
             if detection["id"] in duplicate_ids:

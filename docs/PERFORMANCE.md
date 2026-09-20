@@ -32,9 +32,12 @@ and POI geometry, Python orchestration, networking, previews and default MJPEG
 decode remain CPU work. CPU and GPU paths are available for direct comparison.
 No ROS installation is required.
 
-Current paired measurements and verification are in the
-[September 20 Jetson report](CUDA_VERIFICATION_2026-09-20.md), including CPU wins,
-CUDA wins, tail latency, and complete benchmark provenance.
+The latest before/after optimization measurements are in the
+[CUDA graph and host geometry report](POSE_OPTIMIZATION_2026-09-20.md).
+The earlier [September 20 Jetson report](CUDA_VERIFICATION_2026-09-20.md) compares
+CPU/CUDA backends and records the initial solver verification. Both reports
+include tail latency and benchmark provenance; their measurements are separate
+runs under dynamic clocks and should not be combined as a single comparison.
 
 The [POI and CUDA pose report](POI_AND_CUDA_POSE.md) covers the later custom
 single-tag and joint MultiTag solvers, hardware verification and paired

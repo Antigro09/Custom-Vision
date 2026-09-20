@@ -4,6 +4,8 @@
 #include "cuda_multitag_math.hpp"
 #include <cuda_runtime.h>
 #include <cstring>
+#include <array>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 using namespace vision_pose;
@@ -124,8 +126,13 @@ __global__ void refine_kernel(Camera camera,const Input* observed,const double* 
                     for(int axis=0;axis<2;++axis)res[axis]=(observed[tag].uv[2*corner+axis]-uv[axis])*weight;}}
             for(int axis=0;axis<2;++axis){residual[2*lane+axis]=res[axis];for(int col=0;col<6;++col)J[(2*lane+axis)*6+col]=jac[axis*6+col];}
             __syncthreads();
-            if(lane<36){const int row=lane/6,col=lane%6;for(int k=0;k<128;++k)accumulation+=J[k*6+row]*J[k*6+col];}
-            else if(lane<42){const int row=lane-36;for(int k=0;k<128;++k)accumulation+=J[k*6+row]*residual[k];}
+            // The last tile can contain far fewer than 64 real corners (eight
+            // for a two-tag fit). Its remaining Jacobian rows are identically
+            // zero; do not spend FP64 work accumulating that padding every LM
+            // iteration. Every actual corner retains the same reduction order.
+            const int rows=2*min(64,4*count-first);
+            if(lane<36){const int row=lane/6,col=lane%6;for(int k=0;k<rows;++k)accumulation+=J[k*6+row]*J[k*6+col];}
+            else if(lane<42){const int row=lane-36;for(int k=0;k<rows;++k)accumulation+=J[k*6+row]*residual[k];}
             __syncthreads();
         }
         if(lane<36)A[lane]=accumulation;else if(lane<42)g[lane-36]=accumulation;__syncthreads();
@@ -191,13 +198,63 @@ struct CudaMultiTag::Impl {
     double *host_field=nullptr,*device_field=nullptr;
     vision_multitag::Result *host_result=nullptr,*device_result=nullptr;
     Workspace* work=nullptr;cudaStream_t stream=nullptr;cudaEvent_t begin=nullptr,end=nullptr,done=nullptr;float timing=0;
+    // A bounded per-instance cache handles changing visible tag counts without
+    // rebuilding a graph every frame or sharing mutable work across cameras.
+    struct Graph {cudaGraphExec_t exec=nullptr;std::size_t count=0;double threshold=0;int iterations=0;std::uint64_t used=0;};
+    std::array<Graph,8> graphs{};std::uint64_t clock=0;
+    void enqueue(std::size_t count,double threshold,int iterations);
+    cudaGraphExec_t executable(std::size_t count,double threshold,int iterations);
     Impl(const Camera& c,double s):camera(c),size(s){}
     ~Impl(){cudaSetDevice(0);if(stream)cudaStreamSynchronize(stream);
+        for(auto& graph:graphs)if(graph.exec)cudaGraphExecDestroy(graph.exec);
         if(begin)cudaEventDestroy(begin);if(end)cudaEventDestroy(end);if(done)cudaEventDestroy(done);if(work)cudaFree(work);
         if(device_observed)cudaFree(device_observed);if(device_field)cudaFree(device_field);
         if(!mapped&&device_result)cudaFree(device_result);
         if(host_observed)cudaFreeHost(host_observed);if(host_field)cudaFreeHost(host_field);if(host_result)cudaFreeHost(host_result);if(stream)cudaStreamDestroy(stream);}
 };
+void CudaMultiTag::Impl::enqueue(std::size_t count,double threshold,int iterations){
+    auto& p=*this;
+    check(cudaMemcpyAsync(p.device_observed,p.host_observed,count*sizeof(Input),cudaMemcpyHostToDevice,p.stream),"upload observations");
+    check(cudaMemcpyAsync(p.device_field,p.host_field,count*12*sizeof(double),cudaMemcpyHostToDevice,p.stream),"upload field corners");
+    check(cudaEventRecordWithFlags(p.begin,p.stream,cudaEventRecordExternal),"record start");const int n=static_cast<int>(count),nh=2*n+2;
+    seeds_kernel<<<n,32,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,p.size,p.work);check(cudaGetLastError(),"initialize tag seeds");
+    global_planar_kernel<<<1,1,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,p.size,p.work);check(cudaGetLastError(),"initialize joint plane");
+    score_kernel<<<nh,32,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,threshold,0,nh,p.work);check(cudaGetLastError(),"score seeds");
+    choose_robust_kernel<<<1,1,0,p.stream>>>(n,p.work);check(cudaGetLastError(),"select robust starts");
+    refine_kernel<<<4,64,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,threshold,iterations,true,p.work);check(cudaGetLastError(),"refine robust starts");
+    score_kernel<<<4,32,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,threshold,nh,4,p.work);check(cudaGetLastError(),"score robust starts");
+    final_seed_kernel<<<1,1,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,p.size,p.work);check(cudaGetLastError(),"initialize accepted set");
+    refine_kernel<<<nh+4,64,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,threshold,iterations,false,p.work);check(cudaGetLastError(),"refine accepted set");
+    finalize_kernel<<<1,1,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,threshold,p.work,p.device_result);check(cudaGetLastError(),"finalize joint pose");
+    check(cudaEventRecordWithFlags(p.end,p.stream,cudaEventRecordExternal),"record end");
+    if(!p.mapped){check(cudaMemcpyAsync(p.host_result,p.device_result,sizeof(vision_multitag::Result),cudaMemcpyDeviceToHost,p.stream),"download result");check(cudaEventRecordWithFlags(p.done,p.stream,cudaEventRecordExternal),"record completion");}
+}
+cudaGraphExec_t CudaMultiTag::Impl::executable(std::size_t count,double threshold,int iterations){
+    for(auto& graph:graphs)if(graph.exec&&graph.count==count&&graph.threshold==threshold&&graph.iterations==iterations){
+        graph.used=++clock;return graph.exec;
+    }
+    auto* slot=&graphs[0];
+    for(auto& graph:graphs)if(graph.used<slot->used)slot=&graph;
+    cudaGraph_t captured=nullptr;cudaGraphExec_t executable=nullptr;bool capturing=false;
+    try{
+        // Thread-local capture permits independent camera threads to launch or
+        // synchronize their own streams while this instance records its graph.
+        check(cudaStreamBeginCapture(stream,cudaStreamCaptureModeThreadLocal),"begin solve capture");capturing=true;
+        enqueue(count,threshold,iterations);
+        const auto status=cudaStreamEndCapture(stream,&captured);capturing=false;check(status,"end solve capture");
+        check(cudaGraphInstantiate(&executable,captured,0),"instantiate solve graph");
+        check(cudaGraphDestroy(captured),"release captured graph");captured=nullptr;
+    }catch(...){
+        if(capturing)cudaStreamEndCapture(stream,&captured);
+        if(captured)cudaGraphDestroy(captured);
+        if(executable)cudaGraphExecDestroy(executable);
+        throw;
+    }
+    // All prior calls finished before reaching here; cached graphs are never
+    // evicted while executing. The owning detector also holds its mutex.
+    if(slot->exec)cudaGraphExecDestroy(slot->exec);
+    *slot=Graph{executable,count,threshold,iterations,++clock};return executable;
+}
 CudaMultiTag::CudaMultiTag(const Camera& camera,double size):impl_(new Impl(camera,size)){
     if(!vision_pose::finite(size)||size<=0)throw std::invalid_argument("CUDA MultiTag tag size must be positive");
     check(cudaSetDevice(0),"select device");auto& p=*impl_;cudaDeviceProp prop{};check(cudaGetDeviceProperties(&prop,0),"query device");p.mapped=prop.integrated&&prop.canMapHostMemory;
@@ -224,20 +281,9 @@ const vision_multitag::Result* CudaMultiTag::solve(const Input* observed,const d
     auto& p=*impl_;p.timing=0;check(cudaSetDevice(0),"select device");
     std::memcpy(p.host_observed,observed,count*sizeof(Input));std::memcpy(p.host_field,field,count*12*sizeof(double));
     try{
-        check(cudaMemcpyAsync(p.device_observed,p.host_observed,count*sizeof(Input),cudaMemcpyHostToDevice,p.stream),"upload observations");
-        check(cudaMemcpyAsync(p.device_field,p.host_field,count*12*sizeof(double),cudaMemcpyHostToDevice,p.stream),"upload field corners");
-        check(cudaEventRecord(p.begin,p.stream),"record start");const int n=static_cast<int>(count),nh=2*n+2;
-        seeds_kernel<<<n,32,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,p.size,p.work);check(cudaGetLastError(),"initialize tag seeds");
-        global_planar_kernel<<<1,1,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,p.size,p.work);check(cudaGetLastError(),"initialize joint plane");
-        score_kernel<<<nh,32,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,threshold,0,nh,p.work);check(cudaGetLastError(),"score seeds");
-        choose_robust_kernel<<<1,1,0,p.stream>>>(n,p.work);check(cudaGetLastError(),"select robust starts");
-        refine_kernel<<<4,64,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,threshold,iterations,true,p.work);check(cudaGetLastError(),"refine robust starts");
-        score_kernel<<<4,32,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,threshold,nh,4,p.work);check(cudaGetLastError(),"score robust starts");
-        final_seed_kernel<<<1,1,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,p.size,p.work);check(cudaGetLastError(),"initialize accepted set");
-        refine_kernel<<<nh+4,64,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,threshold,iterations,false,p.work);check(cudaGetLastError(),"refine accepted set");
-        finalize_kernel<<<1,1,0,p.stream>>>(p.camera,p.device_observed,p.device_field,n,threshold,p.work,p.device_result);check(cudaGetLastError(),"finalize joint pose");
-        check(cudaEventRecord(p.end,p.stream),"record end");
-        if(!p.mapped){check(cudaMemcpyAsync(p.host_result,p.device_result,sizeof(vision_multitag::Result),cudaMemcpyDeviceToHost,p.stream),"download result");check(cudaEventRecord(p.done,p.stream),"record completion");}
+        // Replay the same transfers, kernels, quality checks and timing events
+        // with one host launch. No hypothesis or refinement work is removed.
+        check(cudaGraphLaunch(p.executable(count,threshold,iterations),p.stream),"launch solve graph");
         check(cudaEventSynchronize(p.mapped?p.end:p.done),"finish solve");check(cudaEventElapsedTime(&p.timing,p.begin,p.end),"read timing");
     }catch(...){cudaStreamSynchronize(p.stream);throw;}
     return p.host_result;

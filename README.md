@@ -113,6 +113,7 @@ always disables NT. It tests geometry and controls, not neural-model accuracy.
 - [Object geometry and tracking](docs/object_geometry.md)
 - [YOLO26 export and training tools](docs/yolo_exports.md)
 - [Performance measurements and live acceptance procedure](docs/PERFORMANCE.md)
+- [Latest pose optimization and paired measurements](docs/POSE_OPTIMIZATION_2026-09-20.md)
 - [Setup status](docs/SETUP_REPORT.md)
 
 A user service is installed but disabled. After configuring connected cameras:

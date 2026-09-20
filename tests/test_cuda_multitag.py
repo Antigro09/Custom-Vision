@@ -538,3 +538,25 @@ def test_maximum_capacity_and_reused_workspace_do_not_leak_previous_consensus():
         assert maximum == saved, 'Subsequent GPU calls must not mutate returned results'
     finally:
         p.close()
+
+
+def test_graph_cache_eviction_replays_current_corners_and_field_geometry():
+    """Exceed the bounded graph cache, revisit shapes, and change their data."""
+    p = detector()
+    try:
+        saved = []
+        for step, count in enumerate([*range(2, 12), 2, 11, 4, 2]):
+            camera, tags = random_layout(count, 501 + step)
+            uv, world, _ = observation(tags, camera)
+            result = p.estimate_multitag(uv, world)
+            check_native_pose(result, uv, world, camera, list(range(count)))
+            saved.append((result, copy.deepcopy(result)))
+            # Same cached launch, invalid current observations: previous success
+            # must not survive. Then replay new observations through that graph.
+            invalid = p.estimate_multitag(np.zeros_like(uv), world)
+            assert not invalid['pose_valid'] and invalid['inlier_indices'] == []
+            restored = p.estimate_multitag(uv, world)
+            check_native_pose(restored, uv, world, camera, list(range(count)))
+        assert all(result == snapshot for result, snapshot in saved)
+    finally:
+        p.close()

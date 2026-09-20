@@ -140,3 +140,30 @@ September 20 scope and implementation:
   docs/CUDA_VERIFICATION_2026-09-20.md and its machine-readable summary for complete
   paired data and hashes. Actual browser save/restart, cube-depth, 2D/3D, CUDA
   joint-only, POI preview and shutdown/stale clearing were verified locally.
+
+September 20 follow-up optimization:
+- User requested continued speed/efficiency work. Added per-detector joint CUDA
+  graph replay with an eight-entry LRU cache keyed by tag count, threshold and
+  iteration count. Every call uploads fresh corners/field geometry. External
+  event nodes preserve completion/timing; new or evicted shapes pay setup cost.
+- Joint normal equations now skip only zero padding beyond actual tile corners.
+  Host localization reuses joint transforms and removes redundant rotation
+  conversions/small NumPy temporaries. Hypotheses, FP64, iterations, quality gates,
+  coordinate conventions and NT schema are unchanged.
+- Fresh before/after comparison against 3f7f728 on the same device: 7,680 joint
+  calls and 4,800 mapped-image frames verified. Two-worker joint medians fell
+  15–60% across tested planar/nonplanar 2/4/8/16-tag cases. Full CUDA image compute
+  improved 19.994/26.302 to 17.161/23.938 ms median/p95, roughly 49–50 to 56–57 FPS
+  per worker. CPU detection + CUDA pose improved 11.583/17.281 to 10.207/16.441 ms.
+  CUDA detection + CPU pose median worsened 3.4%; some single-worker joint tails
+  worsened. Do not claim universal gains, physical-camera latency, or power savings.
+- 551 distinct pytest tests passed across isolated runs (543 with three skips,
+  plus all eight actual TensorRT tests), 15 dashboard tests and both runtime
+  smokes passed. An initial combined run had three TensorRT fixture setup errors
+  from GPU out-of-memory with full swap; isolated runs resolve the test pressure,
+  not proof of unrestricted simultaneous workloads. Eight create/solve/close
+  cycles showed stable memory; four cached graph shapes cost about 2.5 MiB extra
+  process RSS versus baseline. Sanitizer/physical-camera limitations still apply.
+- See docs/POSE_OPTIMIZATION_2026-09-20.md and its paired machine summary. Local
+  raw artifacts live in ignored data/pose-optimization-2026-09-20/. Verified native
+  binary SHA-256: d075a764392c99d4fe592b4f3eaa78ea95c7196b4f0948660920fb0804897c9a.

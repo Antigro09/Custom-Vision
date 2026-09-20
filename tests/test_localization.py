@@ -374,3 +374,24 @@ def test_empty_frame_clears_localization(calibration, scene):
     assert valid["localization"]["valid"]
     result = localizer.enrich([], (800, 1280))
     assert not result["localization"]["valid"] and result["localization"]["field_to_camera"] is None
+
+
+def test_pose_serialization_preserves_rotations_at_zero_pi_and_gimbal_lock():
+    from custom_vision.localization import pose_dict
+    rng = np.random.default_rng(1086)
+    rotations = [[0., 0., 0.], [180., 0., 0.], [0., 180., 0.], [0., 0., 180.],
+                 [30., 90., 50.], [30., -90., 50.], [179.999, 0., 0.]]
+    rotations.extend(rng.uniform(-180., 180., (100, 3)).tolist())
+    for angles in rotations:
+        expected = transform([.3, -.7, 2.], angles)
+        published = pose_dict(expected)
+        w, x, y, z = published['rotation_quaternion_wxyz']
+        assert w >= 0
+        assert math.hypot(w, x, y, z) == pytest.approx(1., abs=1e-12)
+        # Independently reconstruct the quaternion's rotation matrix.
+        actual = np.array([[1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)],
+                           [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)],
+                           [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)]])
+        np.testing.assert_allclose(actual, expected[:3, :3], atol=1e-9)
+        np.testing.assert_allclose(transform(published['translation_m'], published['rotation_rpy_deg']),
+                                   expected, atol=1e-9)
