@@ -3,7 +3,7 @@ on:
   push:
     branches: [main, 'codex/**']
   pull_request:
-    paths: ['native/**', 'custom_vision/**', 'tests/**', 'scripts/**', 'CMakeLists.txt', '.github/workflows/pose.yml']
+    paths: ['native/**', 'custom_vision/**', 'tests/**', 'scripts/**', 'config/**', 'pyproject.toml', 'CMakeLists.txt', '.github/workflows/pose.yml']
   workflow_dispatch:
 permissions:
   contents: read
