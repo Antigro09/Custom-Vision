@@ -49,9 +49,11 @@ def make_detector(cfg, config):
     if cfg['type']=='apriltag':
         from .localization import Localization
         settings=dict(cfg['settings'])
+        from .poi import PointOfInterestTracker
+        poi=PointOfInterestTracker(cfg.get('poi'),cfg.get('calibration_data'),cfg.get('robot_to_camera'))
         layout=config.get('field_layout_data')
         localizer=Localization(settings,cfg.get('calibration_data'),layout,cfg.get('robot_to_camera'))
-        if layout is not None and settings.get('multitag',True) and not settings.get('always_single_tag',False):
+        if layout is not None and settings.get('multitag',True) and not settings.get('always_single_tag',False) and not poi.settings['enabled']:
             settings['known_tag_ids']=list(localizer.field_tags)
             settings['skip_single_when_multi']=True
         if settings.get('backend','pupil')=='native':
@@ -61,6 +63,10 @@ def make_detector(cfg, config):
             from .apriltags import AprilTagPipeline
             detector=AprilTagPipeline(settings,cfg.get('calibration_data'))
         detector.localization=localizer
+        localizer.single_pose_solver=detector._estimate_pose
+        if settings.get('pose_device','cpu') == 'cuda':
+            localizer.multitag_solver=detector.estimate_multitag
+        detector.poi=poi if poi.settings['enabled'] else None
         return detector
     from .objects import ObjectPipeline
     from .object_geometry import ObjectGeometry
@@ -139,7 +145,8 @@ class Runtime:
             def renderer(payload,frame):
                 from .overlay import annotate
                 cfg=by_name[payload['pipeline']]
-                return annotate(frame,payload['detections'],cfg.get('calibration_data'),cfg['settings'].get('tag_size_m',.1651),objects=payload.get('objects'))
+                return annotate(frame,payload['detections'],cfg.get('calibration_data'),cfg['settings'].get('tag_size_m',.1651),objects=payload.get('objects'),poi=payload.get('poi'),
+                                box_depth_ratio=cfg.get('preview',{}).get('box_depth_ratio',.5))
             self.dashboard.set_renderer(renderer)
 
     def request_restart(self):
@@ -179,12 +186,19 @@ class Runtime:
                      'mode':cfg.get('settings',{}).get('mode','3d') if cfg['type']=='apriltag' else cfg.get('settings',{}).get('task','detect'),
                      'backend':cfg.get('settings',{}).get('backend','pupil' if cfg['type']=='apriltag' else 'contour'),
                      'detector_device':('cuda' if cfg.get('settings',{}).get('backend')=='tensorrt' else 'cpu') if cfg['type']=='object' else cfg.get('settings',{}).get('detector_device','cpu'),
+                     # Reports the single-tag solve actually run this frame.
+                     # Joint field solving has its own localization.pose_device.
+                     'pose_device':'none',
                      'input_kind':cfg.get('input_kind','camera'),'connected':error is None,'frame_id':frame_id,'capture_monotonic_us':int(captured*1e6),
                      'publish_unix_us':time.time_ns()//1000,'latency_ms':max(0.,(now-captured)*1000),
                      'timestamp_source':'host_frame_read_complete',
                      'capture_latency_offset_ms':cfg.get('camera',{}).get('capture_latency_offset_ms',0),
                      'detections':detections,'error':error,'preview_settings':cfg.get('preview',{})}
             if extras: payload.update(extras)
+            if error is not None:
+                payload['fps']=0.
+                payload['pose_device']='none'
+                payload['poi']={'valid':False,'selected_name':None,'targets':[],'invalid_reason':error}
             self.publisher.publish(payload)
             if self.dashboard: self.dashboard.update(payload,frame)
 
@@ -218,10 +232,26 @@ class Runtime:
                             detections=detector.process(frame)
                             detector_end=time.monotonic()
                             extras={}
+                            # Localization may invoke a pose-only fallback on
+                            # this detector. Snapshot frame timing before that
+                            # call can overwrite the detector's last timings.
+                            native_timings=getattr(detector,'last_timings',{})
+                            if cfg['type']=='apriltag':
+                                attempted=any(d.get('pose_attempted',d.get('pose_valid',False)) for d in detections)
+                                extras['pose_device']=cfg['settings'].get('pose_device','cpu') if attempted else 'none'
+                            if getattr(detector,'poi',None) is not None:
+                                extras['poi']=detector.poi.process(detections,frame.shape,captured)
                             if hasattr(detector,'localization'):
                                 enrichment=detector.localization.enrich(detections,frame.shape)
                                 detections=enrichment['detections']
                                 extras['localization']=enrichment['localization']
+                                fallback=enrichment['localization'].get('single_tag_fallback',{})
+                                devices=set(fallback.get('devices',[]))
+                                if extras.get('pose_device') in ('cpu','cuda'):
+                                    devices.add(extras['pose_device'])
+                                extras['pose_device']=next(iter(devices)) if len(devices)==1 else 'mixed' if devices else 'none'
+                                if 'pose_ms' in native_timings:
+                                    extras['single_tag_pose_ms']=native_timings['pose_ms']+fallback.get('pose_ms',0.)
                             if hasattr(detector,'geometry'):
                                 previous_capture=geometry_capture.get(cfg['name'])
                                 if previous_capture is not None and (captured-previous_capture)*1000>max_age:
@@ -238,12 +268,12 @@ class Runtime:
                                 interval=finished-state.get('last_publish',0)
                                 fps=1/interval if state.get('last_publish',0) and interval>0 else 0
                                 previous=state.get('fps',0)
-                                fps=.2*fps+.8*previous if previous else fps
+                                fps=1/(.2/fps+.8/previous) if previous and fps else fps
                                 state.update(last_frame=captured,frame_id=frame_id,failed=False,last_publish=finished,fps=fps)
                             extras.update(frame_size=[frame.shape[1],frame.shape[0]],processing_ms=(finished-started)*1000,detector_ms=(detector_end-started)*1000,
                                           localization_ms=(finished-detector_end)*1000,queue_ms=max(0.,(started-captured)*1000),
                                           fps=fps,dropped_frames=getattr(cap,'dropped_frames',0),
-                                          native_timings=getattr(detector,'last_timings',{}))
+                                          native_timings=native_timings)
                             if (finished-captured)*1000>max_age:
                                 if hasattr(detector,'geometry'): detector.geometry.reset()
                                 self.emit(cfg,frame_id,captured,[],error=f'Frame exceeded {max_age:g} ms age limit')

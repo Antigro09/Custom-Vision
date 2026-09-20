@@ -1,22 +1,28 @@
 # Team 1086 Custom Vision
 
 AprilTag localization and object acquisition vision for the Jetson Orin Nano Super, with a
-browser setup interface and NetworkTables 4 output. The detector and single-tag
-pose solver run in C++; Python manages cameras, configuration, joint localization
-and publication. Each camera has an independent worker that takes the newest
+browser setup interface and NetworkTables 4 output. Native C++/CUDA handles tag
+detection and optional single-tag and joint field PnP. Python manages cameras,
+configuration, coordinate transforms and publication. Each camera has an independent worker that takes the newest
 frame. Preview rendering runs separately and only when requested.
 
 ## Implemented
 
 - **2D:** tag IDs, corners, calibrated bearings (nominal FOV fallback explicitly marked).
 - **3D:** calibrated single-tag PnP, ambiguity and reprojection checks, camera- and
-  robot-relative tag transforms, and 3D box/axis preview overlays.
-- **MultiTag:** a joint solve using uploaded WPILib field coordinates, whole-tag
-  outlier rejection and field camera/robot poses. Robot poses require measured
-  camera mounting extrinsics. Individual PnP is skipped when a joint solve suffices.
+  robot-relative tag transforms, and adjustable 3D box/axis preview overlays.
+  Optional custom CUDA IPPE/refinement is selectable independently of detection;
+  the same pose-device setting controls joint MultiTag and pose fallbacks.
+- **POI aiming:** configured tag-relative 3D offsets with current-frame angular
+  bearings, quality checks and NT4 topics; independent of field maps and odometry.
+- **MultiTag:** a CPU or custom CUDA joint solve using uploaded WPILib field
+  coordinates, whole-tag outlier rejection and field camera/robot poses. Robot poses require measured
+  camera mounting extrinsics. Individual PnP is skipped when a joint solve suffices,
+  except when POI aiming needs an independent tag observation.
 - **Browser setup:** camera mode tuples, driver-reported UVC controls, calibration
   and field JSON uploads, measured mount, 2D/3D, decoder settings, and independent
-  preview resolution, FPS, quality and 90° rotation. Saving validates and restarts
+  preview resolution, FPS, quality and 90° rotation. Processed FPS, latency and
+  stage times are displayed separately. Saving validates and restarts
   the runtime; old targets are invalidated during reconfiguration.
 - **NT4:** coherent versioned JSON per frame, synchronized server timestamps when
   available, pose convenience topics, boot identifiers and freshness watchdogs.
@@ -59,10 +65,12 @@ be inferred accurately from its factory focus description or nominal FOV.
 
 The C++ build privately pins AprilTag 3.4.5, uses CPU-specific release optimization,
 releases Python's GIL, avoids nested OpenCV thread pools, and provides optional
-CUDA preprocessing and CUDA detector acceleration. See [native build details](native/README.md)
+CUDA preprocessing, CUDA detection and custom CUDA single-tag and joint MultiTag PnP. See [native build details](native/README.md)
 and [the performance report](docs/PERFORMANCE.md) for the measured paths and limits.
 CUDA must be selected explicitly and passes capability validation; it never silently
-falls back to CPU. Camera JPEG decoding remains on the CPU in the default capture path.
+falls back to CPU PnP. CUDA pose supports 4/5/8-coefficient pinhole distortion
+and up to 256 observed mapped tags per joint solve. Coordinate transforms, POI
+projection, NetworkTables, UI and default camera JPEG decoding still use the CPU.
 
 The initial target is **12–24 ms camera-to-robot latency**, subject to measurement.
 No physical cameras were available during implementation. Synthetic compute timings
@@ -77,6 +85,8 @@ scene, cameras, calibration, quality thresholds and timing method.
 .venv/bin/python scripts/smoke_test.py
 .venv/bin/python scripts/smoke_objects.py
 .venv/bin/python scripts/benchmark_apriltags.py --backend native --cameras 2
+# Actual GPU cases explicitly skip without a CUDA build/device:
+.venv/bin/python -m pytest -q -ra tests/test_cuda_pose.py tests/test_cuda_multitag.py
 .venv/bin/python scripts/demo_apriltags.py --port 5802
 # Run separately on the same port for the object geometry demo:
 .venv/bin/python scripts/demo_objects.py --port 5802
@@ -96,6 +106,8 @@ always disables NT. It tests geometry and controls, not neural-model accuracy.
 - [Camera modes and exposure](docs/cameras.md)
 - [Intrinsic calibration](docs/apriltags.md)
 - [Field coordinates, mounting and MultiTag](docs/localization.md)
+- [Tag-relative POI aiming, FPS and CUDA PnP](docs/POI_AND_CUDA_POSE.md)
+- [September 20 Jetson verification and paired CUDA measurements](docs/CUDA_VERIFICATION_2026-09-20.md)
 - [Browser controls](docs/dashboard.md)
 - [NetworkTables contract and future robot integration](docs/networktables.md)
 - [Object geometry and tracking](docs/object_geometry.md)

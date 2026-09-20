@@ -9,7 +9,8 @@ from .calibration import validate_calibration
 
 
 def annotate(frame: np.ndarray, detections: list[dict], calibration: dict | None = None,
-             tag_size_m: float = .1651, objects: dict | None = None) -> np.ndarray:
+             tag_size_m: float = .1651, objects: dict | None = None,
+             *, poi: dict | None = None, box_depth_ratio: float = .5) -> np.ndarray:
     """Copy a captured frame and draw tag poses or object target overlays.
 
     Call this in the preview worker after publication, only at preview FPS.
@@ -23,9 +24,11 @@ def annotate(frame: np.ndarray, detections: list[dict], calibration: dict | None
         checked = validate_calibration(calibration)
         if (width, height) == (checked["width"], checked["height"]):
             matrix, distortion = np.array(checked["camera_matrix"]), np.array(checked["dist_coeffs"])
+    if not np.isfinite(box_depth_ratio) or not .1 <= box_depth_ratio <= 2.:
+        raise ValueError("box_depth_ratio must be in [0.1, 2]")
     half = tag_size_m / 2
     square = np.array([[-half, half, 0.], [half, half, 0.], [half, -half, 0.], [-half, -half, 0.]])
-    cube = np.vstack((square, square + [0., 0., -tag_size_m / 2]))
+    cube = np.vstack((square, square + [0., 0., -tag_size_m * box_depth_ratio]))
     axes = np.array([[0., 0., 0.], [0., 0., -tag_size_m / 2],
                      [-tag_size_m / 2, 0., 0.], [0., tag_size_m / 2, 0.]])
     for detection in detections:
@@ -61,6 +64,21 @@ def annotate(frame: np.ndarray, detections: list[dict], calibration: dict | None
                 cv2.line(result, tuple(projected[8]), tuple(projected[index]), color, 2, cv2.LINE_AA)
         except (KeyError, ValueError, cv2.error):
             continue
+    if matrix is not None and poi:
+        for target in poi.get("targets", []):
+            if not target.get("geometry_valid") or not target.get("in_image"):
+                continue
+            pixel = np.asarray(target.get("pixel"), dtype=float)
+            if pixel.shape != (2,) or not np.isfinite(pixel).all():
+                continue
+            x, y = np.rint(pixel).astype(int)
+            if not (0 <= x < width and 0 <= y < height):
+                continue
+            color = (200, 80, 255) if target.get("valid") else (0, 180, 255)
+            cv2.drawMarker(result, (x, y), color, cv2.MARKER_CROSS, 22, 2, cv2.LINE_AA)
+            label = f"POI {target.get('name', '')}" + ("" if target.get("valid") else " PREVIEW ONLY")
+            cv2.putText(result, label, (x + 12, max(15, y - 10)), cv2.FONT_HERSHEY_SIMPLEX,
+                        .45, color, 1, cv2.LINE_AA)
     _draw_objects(result, detections, objects)
     return result
 

@@ -7,25 +7,40 @@ on 2026-09-13. Results below distinguish detector/pose compute from total age.
 
 ## Implemented latency controls
 
-- Private optimized C++17 AprilTag detector and single-tag PnP; GIL released while
+- Private optimized C++17 AprilTag detector and single-tag PnP, plus optional
+  custom CUDA single-tag and joint MultiTag fitting; GIL released while
   processing, zero-copy grayscale input when supplied, reusable native buffers.
 - Two independent camera workers, two detector CPU threads per camera, one thread
   per OpenCV operation to avoid nested thread-pool oversubscription.
 - Live capture continuously drains the driver; inference consumes the latest
   decoded frame. Intermediate frames are counted and dropped rather than queued.
-- MultiTag jointly solves mapped corners and derives target poses, avoiding
-  redundant individual PnP when the joint solve succeeds.
+- MultiTag jointly solves mapped corners and derives target poses on the selected
+  CPU/CUDA pose path, avoiding redundant individual PnP when the joint solve
+  succeeds. POI tracking retains independent single-tag observations.
 - Preview overlay/rotation/resize/JPEG work happens on a separate demand-driven
   worker, capped independently. No viewers means no preview compression.
 - NT4 requests 10 ms delivery and flushes; one JSON snapshot preserves frame
   coherence. Time synchronization and freshness checks are separate from FPS.
 - Optional CUDA full-frame tag search with full-resolution CPU decode verification
-  and PnP. This retains actual decision margin, hamming and decoded corner order.
+  and independently selected CPU/CUDA single-tag and joint MultiTag PnP. This retains actual decision
+  margin, hamming and decoded corner order.
   Optional grayscale CUDA conversion is a separate setting, not GPU detection.
 
-GPU acceleration does not imply that MJPEG decode, networking, Python orchestration
-or joint localization runs on CUDA. The CPU-native and GPU-native paths are both
-available for direct comparison. No ROS installation is required.
+Selecting `pose_device: cuda` moves single-tag fitting, joint mapped MultiTag
+fitting and pose fallbacks to custom CUDA kernels. Coordinate transforms, bearing
+and POI geometry, Python orchestration, networking, previews and default MJPEG
+decode remain CPU work. CPU and GPU paths are available for direct comparison.
+No ROS installation is required.
+
+Current paired measurements and verification are in the
+[September 20 Jetson report](CUDA_VERIFICATION_2026-09-20.md), including CPU wins,
+CUDA wins, tail latency, and complete benchmark provenance.
+
+The [POI and CUDA pose report](POI_AND_CUDA_POSE.md) covers the later custom
+single-tag and joint MultiTag solvers, hardware verification and paired
+benchmarks. The September 13 tables below predate both custom pose solvers and
+used CPU PnP even with CUDA detection. They do not measure the current CUDA joint
+solver.
 
 ## Measured on this Jetson — 2026-09-13
 
@@ -43,8 +58,8 @@ locked. Each row is a separate run, not a statistical confidence interval.
 | CPU, decimation 2, contrast 15 | 6.92 | 11.18 | 12.98 | 19.43 |
 | CPU, decimation 4 | 10.75 | 15.44 | 17.75 | 20.24 |
 | CUDA, decimation 2, noise stress | 15.01 | 18.47 | 20.76 | 27.40 |
-| CUDA + MultiTag, mapped scene | 16.69 | 24.97 | 26.46 | 28.13 |
-| CPU + MultiTag, mapped scene | 11.46 | 19.11 | 23.01 | 26.38 |
+| CUDA detection + CPU MultiTag, mapped scene | 16.69 | 24.97 | 26.46 | 28.13 |
+| CPU detection + CPU MultiTag, mapped scene | 11.46 | 19.11 | 23.01 | 26.38 |
 
 Every run recovered the expected tag set in **600/600 measured frames**. The mapped
 scene additionally required a valid joint pose in every frame. These are repeated
@@ -86,6 +101,58 @@ then verifies/refines candidates against full-resolution raw pixels. Increasing
 CPU `min_white_black_diff` skips low-contrast tiles and can reduce background work,
 but can lose dim/distant tags. Keep representative recorded scenes in the tuning
 loop; never pick a threshold solely because the synthetic score improves.
+
+## Current CPU/CUDA pose comparisons
+
+`settings.pose_device` now controls single-tag fitting, joint mapped MultiTag and
+pose fallbacks. CUDA supports 4/5/8-coefficient pinhole distortion and up to 256
+observed mapped tags in one joint solve. Its deterministic multiple-start search
+is not a proof that every geometric solution was found. Compare validated poses
+and accepted IDs, not just runtimes. Coordinate transforms, bearing/POI math,
+publication and previews remain CPU work.
+
+Use matched rendered-image settings to compare the full detector/enrichment path:
+
+```bash
+.venv/bin/python scripts/benchmark_apriltags.py --backend native --detector-device cuda \
+  --pose-device cpu --cameras 2 --localization --poi --frames 300 --warmup 30 \
+  --output data/apriltags-cpu-pose-new.json
+.venv/bin/python scripts/benchmark_apriltags.py --backend native --detector-device cuda \
+  --pose-device cuda --cameras 2 --localization --poi --frames 300 --warmup 30 \
+  --output data/apriltags-cuda-pose-new.json
+.venv/bin/python scripts/benchmark_multitag.py --devices cpu cuda --cameras 2 \
+  --tags 2 4 8 16 --layouts planar nonplanar --rounds 2 --frames 200 --warmup 20 \
+  --output data/multitag-new.json
+```
+
+POI forces independent single-tag poses before the joint solve. Omit `--poi` from
+both image runs to measure the runtime's normal skip-single optimization. Keep
+all other settings identical and reverse run order on subsequent repetitions.
+The separate MultiTag benchmark isolates complete `Localization.enrich` calls
+using independently generated known-world corners, twelve oblique camera views,
+planar/nonplanar layouts and optional `--noise-px 0.1`. It bypasses tag detection.
+It checks every pose against known camera translation/rotation and independent
+pixel projection, verifies accepted tag IDs, and rejects invalid or wrong-device
+results. It uses the same runtime factory to bind CPU/CUDA solvers.
+
+Both benchmark tools save raw samples, effective settings and source/binary
+hashes; they refuse to overwrite output. Input projection/copying and independent
+correctness checks are outside measured intervals, with finish barriers preventing
+validation or CUDA teardown from contaminating peer timings. Joint
+`localization.gpu_timings` separates kernel event time, native solver work and
+outer native-call time. Those are nested measurements, not additive costs. Use
+full-call wall time and sustained worker FPS for comparisons. No newer GPU
+speedup can be inferred from the September 13 tables above.
+
+The current GPU regression command is:
+
+```bash
+.venv/bin/python -m pytest -q -ra tests/test_cuda_pose.py tests/test_cuda_multitag.py
+```
+
+Compute Sanitizer instrumentation remains blocked by the recorded Jetson debug
+access restriction; normal test execution does not establish a successful
+sanitizer run. See [verification and rerun details](POI_AND_CUDA_POSE.md#jetson-verification--2026-09-20).
 
 ## Live acceptance test
 

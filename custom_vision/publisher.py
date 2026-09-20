@@ -80,7 +80,10 @@ class Publisher:
                        'latency_ms':'Double','tag_ids':'IntegerArray','pose_valid':'Boolean','field_to_robot':'DoubleArray',
                        'used_tag_ids':'IntegerArray','capture_server_us':'Integer','time_sync_valid':'Boolean',
                        'target_valid':'Boolean','selected_track_id':'Integer','selected_target_robot':'DoubleArray',
-                       'approach_robot_xy':'DoubleArray','object_track_ids':'IntegerArray'}
+                       'approach_robot_xy':'DoubleArray','object_track_ids':'IntegerArray',
+                       'fps':'Double','poi_valid':'Boolean','poi_name':'String','poi_tag_id':'Integer',
+                       'poi_tx_deg':'Double','poi_ty_deg':'Double','poi_camera_xyz':'DoubleArray',
+                       'poi_robot_xyz':'DoubleArray','poi_robot_yaw_deg':'DoubleArray'}
                 self.tables[name]={key:getattr(table,f'get{kind}Topic')(key).publish(options) for key,kind in types.items()}
             topics=self.tables[name]
             localization=payload.get('localization') or {}
@@ -89,8 +92,18 @@ class Publisher:
             objects=payload.get('objects') or {}
             selected=objects.get('selected_target') or {}
             target_valid=bool(payload.get('connected') and objects.get('valid') and selected.get('valid') and selected.get('observed'))
+            poi=payload.get('poi') or {}
+            aim=next((p for p in poi.get('targets',[]) if p.get('name')==poi.get('selected_name') and p.get('valid')),None)
+            aim=aim if payload.get('connected') and poi.get('valid') else None
             values={'result':encoded,'connected':payload['connected'],'has_target':bool(payload['detections']),
                     'frame_id':payload['frame_id'],'count':len(payload['detections']),'latency_ms':payload['latency_ms'],
+                    'fps':payload.get('fps',0.) if payload.get('connected') else 0.,
+                    'poi_valid':bool(aim),'poi_name':aim['name'] if aim else '',
+                    'poi_tag_id':aim['tag_id'] if aim else -1,
+                    'poi_tx_deg':aim['tx_deg'] if aim else 0.,'poi_ty_deg':aim['ty_deg'] if aim else 0.,
+                    'poi_camera_xyz':aim['camera_translation_m'] if aim else [],
+                    'poi_robot_xyz':(aim.get('robot_translation_m') or []) if aim else [],
+                    'poi_robot_yaw_deg':[aim['robot_yaw_deg']] if aim and aim.get('robot_yaw_deg') is not None else [],
                     'tag_ids':[d['id'] for d in payload['detections'] if 'id' in d],'pose_valid':valid,
                     'field_to_robot':(robot_pose['translation_m']+robot_pose['rotation_quaternion_wxyz']) if valid else [],
                     'used_tag_ids':localization.get('used_tag_ids',[]) if valid else [],

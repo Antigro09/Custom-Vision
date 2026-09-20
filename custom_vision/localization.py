@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+import time
 
 import cv2
 import numpy as np
@@ -256,6 +257,10 @@ class Localization:
         self.mode = config.get("mode", "3d")
         if self.mode not in ("2d", "3d"):
             raise ValueError("apriltags.mode must be '2d' or '3d'")
+        self.pose_device = config.get('pose_device', 'cpu')
+        if self.pose_device not in ('cpu', 'cuda'):
+            raise ValueError('pose_device must be cpu or cuda')
+        self.multitag_solver = None
         self.tag_size_m = _number(config.get("tag_size_m", .1651), "tag_size_m", positive=True)
         self.max_error = _number(config.get("max_reprojection_error_px", 3.),
                                  "max_reprojection_error_px", positive=True)
@@ -281,6 +286,9 @@ class Localization:
         self.field_layout = validate_field_layout(field_layout) if field_layout is not None else None
         self.field_tags, self.field_corners = {}, {}
         self.raw_corners = _raw_corners(self.tag_size_m)
+        self.single_pose_calls = 0
+        self.single_pose_ms = 0.
+        self.single_pose_devices = set()
         wp_corners = self.raw_corners @ RAW_FROM_WP_TAG
         for tag in self.field_layout["tags"] if self.field_layout else []:
             xyz = np.array([tag["pose"]["translation"][k] for k in ("x", "y", "z")])
@@ -313,10 +321,25 @@ class Localization:
         detection["pose_ambiguous"] = detection.get("pose_ambiguity", 1.) > self.max_ambiguity
 
     def _ensure_single(self, detection: dict) -> None:
-        if "pose_ambiguity" not in detection or (not detection.get("pose_valid")
-                                                    and "rvec_rad" not in detection):
-            detection.update(estimate_tag_pose(detection["corners"], self.tag_size_m, self.matrix,
-                                               self.distortion, self.max_error))
+        needs_pose = ("pose_ambiguity" not in detection or (not detection.get("pose_valid")
+                                                          and "rvec_rad" not in detection))
+        # Never rerun a completed native solve (or silently fall back from CUDA)
+        # just because its quality check rejected the result.
+        if needs_pose and not detection.get("pose_attempted", False):
+            solver = getattr(self, "single_pose_solver", None)
+            if solver is None and self.pose_device == 'cuda':
+                raise RuntimeError('CUDA single-tag solver is unavailable; no CPU fallback is allowed')
+            started = time.perf_counter_ns()
+            estimate = solver(detection["corners"]) if solver else estimate_tag_pose(
+                detection["corners"], self.tag_size_m, self.matrix, self.distortion, self.max_error)
+            self.single_pose_ms += (time.perf_counter_ns() - started) / 1e6
+            self.single_pose_calls += 1
+            self.single_pose_devices.add(estimate.get('pose_device', 'cpu'))
+            detection.update(estimate)
+            # An invalid completed solve must not run twice when robust joint
+            # localization considers per-tag seeds and then emits its targets.
+            detection['pose_device'] = estimate.get('pose_device', 'cpu')
+            detection['pose_attempted'] = True
         detection.setdefault("pose_source", "single_tag_pnp")
         if detection.get("pose_valid"):
             detection.pop("pose_invalid_reason", None)
@@ -340,6 +363,8 @@ class Localization:
         return result
 
     def _multitag(self, known: list[dict]) -> tuple[dict, np.ndarray | None]:
+        if self.pose_device == 'cuda':
+            return self._multitag_cuda(known)
         points = np.concatenate([self.field_corners[d["id"]] for d in known])
         observed = np.concatenate([np.asarray(d["corners"], dtype=np.float64) for d in known])
         candidates = []
@@ -441,20 +466,71 @@ class Localization:
         except cv2.error:
             return _empty("multitag_pnp_failed"), None
 
-    def _derive_target(self, detection: dict, field_to_camera: np.ndarray, ambiguity: float) -> None:
+    def _multitag_cuda(self, known: list[dict]) -> tuple[dict, np.ndarray | None]:
+        """Use original mapped corners; all fitting and consensus stay on CUDA."""
+        if self.multitag_solver is None:
+            raise RuntimeError('CUDA MultiTag solver is unavailable; no CPU fallback is allowed')
+        points = np.asarray([self.field_corners[d['id']] for d in known], dtype=np.float64)
+        observed = np.asarray([d['corners'] for d in known], dtype=np.float64)
+        started = time.perf_counter_ns()
+        solved = self.multitag_solver(observed, points)
+        wall_ms = (time.perf_counter_ns() - started) / 1e6
+        timing = dict(solved.get('timings', {}), call_ms=wall_ms)
+        if solved.get('pose_device') != 'cuda':
+            raise RuntimeError('CUDA MultiTag solver returned unexpected execution device')
+        if not solved.get('pose_valid'):
+            result = _empty(solved.get('pose_invalid_reason', 'cuda_multitag_failed'))
+            result.update(pose_device='cuda', gpu_timings=timing)
+            return result, None
+        # No solvePnP/projectPoints here: the GPU already checked every accepted
+        # corner. These operations only change the output coordinate convention.
+        rvec = np.asarray(solved['rvec_rad'], dtype=np.float64).reshape(3)
+        tvec = np.asarray(solved['tvec_m'], dtype=np.float64).reshape(3)
+        indices = solved['inlier_indices']
+        if (not np.isfinite(rvec).all() or not np.isfinite(tvec).all()
+                or len(indices) < 2 or len(set(indices)) != len(indices)
+                or any(not isinstance(i, int) or not 0 <= i < len(known) for i in indices)):
+            raise RuntimeError('CUDA MultiTag returned invalid geometric output')
+        camera_to_field = _transform(CV_TO_NWU @ cv2.Rodrigues(rvec)[0], CV_TO_NWU @ tvec)
+        field_to_camera = invert_transform(camera_to_field)
+        accepted = set(indices)
+        ids = [d['id'] for i, d in enumerate(known) if i in accepted]
+        rejected = [d['id'] for i, d in enumerate(known) if i not in accepted]
+        result = self._result(field_to_camera, 'multitag_pnp', ids,
+                              solved['reprojection_error_px'], solved['pose_ambiguity'], rejected)
+        result.update(pose_device='cuda', gpu_timings=timing,
+                      coplanar=bool(solved.get('coplanar', False)),
+                      tag_reprojection_errors_px={str(known[i]['id']): solved['per_tag_reprojection_error_px'][i]
+                                                  for i in indices})
+        return result, field_to_camera if result['valid'] else None
+
+    def _derive_target(self, detection: dict, field_to_camera: np.ndarray, ambiguity: float,
+                       gpu_error: float | None = None) -> None:
         camera_to_target = invert_transform(field_to_camera) @ self.field_tags[detection["id"]]
         raw_rotation = CV_TO_NWU.T @ camera_to_target[:3, :3] @ RAW_FROM_WP_TAG.T
         raw_translation = CV_TO_NWU.T @ camera_to_target[:3, 3]
         rvec = cv2.Rodrigues(raw_rotation)[0]
-        error, _ = _rms(self.raw_corners, np.asarray(detection["corners"]), rvec,
-                        raw_translation, self.matrix, self.distortion)
+        if self.pose_device == 'cuda':
+            if gpu_error is None or not math.isfinite(gpu_error) or not 0 <= gpu_error <= self.max_error:
+                raise RuntimeError('CUDA field-derived target lacks its validated GPU residual')
+            error = gpu_error
+        else:
+            error, _ = _rms(self.raw_corners, np.asarray(detection["corners"]), rvec,
+                            raw_translation, self.matrix, self.distortion)
+        # A preceding single-tag solve (required by POI) can have a different
+        # alternate branch. It is not the alternate of this joint field pose
+        # and must not be paired with the joint solution/ambiguity on the wire.
+        for key in ("alternate_rvec_rad", "alternate_tvec_m", "alternate_reprojection_error_px"):
+            detection.pop(key, None)
         detection.update(pose_valid=True, rvec_rad=rvec.reshape(3).tolist(), tvec_m=raw_translation.tolist(),
                          distance_m=float(np.linalg.norm(raw_translation)), reprojection_error_px=error,
-                         pose_ambiguity=ambiguity, pose_source="field_layout_multitag")
+                         pose_ambiguity=ambiguity, pose_source="field_layout_multitag", pose_device=self.pose_device)
         detection.pop("pose_invalid_reason", None)
         self._relative(detection)
 
     def enrich(self, detections: list, image_shape) -> dict:
+        self.single_pose_calls, self.single_pose_ms = 0, 0.
+        self.single_pose_devices.clear()
         if len(image_shape) < 2 or min(image_shape[:2]) <= 0:
             raise ValueError("image_shape must contain positive capture height and width")
         height, width = int(image_shape[0]), int(image_shape[1])
@@ -477,7 +553,8 @@ class Localization:
                             "alternate_rvec_rad", "alternate_tvec_m", "alternate_reprojection_error_px",
                             "reprojection_error_px", "pose_source"):
                     detection.pop(key, None)
-                detection.update(pose_valid=False, pose_invalid_reason=reason)
+                detection.update(pose_valid=False, pose_invalid_reason=reason,
+                                 pose_device="none", pose_attempted=False)
             output.append(detection)
         if reason:
             return {"detections": output, "localization": _empty(reason)}
@@ -487,10 +564,12 @@ class Localization:
         result, field_to_camera = _empty("no_field_layout" if not self.field_tags else "no_known_tags"), None
         if len(known) >= 2 and self.multitag:
             result, field_to_camera = self._multitag(known)
+            result['pose_device'] = self.pose_device
         for detection in output:
             if (field_to_camera is not None and not self.always_single_tag and
                     detection["id"] in result["used_tag_ids"]):
-                self._derive_target(detection, field_to_camera, result["ambiguity"])
+                self._derive_target(detection, field_to_camera, result["ambiguity"],
+                                     result.get('tag_reprojection_errors_px', {}).get(str(detection['id'])))
             else:
                 self._ensure_single(detection)
             if detection["id"] in duplicate_ids:
@@ -508,10 +587,15 @@ class Localization:
                 field_to_camera = self.field_tags[detection["id"]] @ invert_transform(camera_to_tag)
                 result = self._result(field_to_camera, "single_tag_pnp", [detection["id"]],
                                       detection["reprojection_error_px"], detection["pose_ambiguity"])
+                result['pose_device'] = detection.get('pose_device', 'cpu')
             else:
                 result = _empty(detection.get("pose_invalid_reason", "pnp_failed"))
         if duplicate_ids:
             result["duplicate_tag_ids"] = sorted(duplicate_ids)
             if not known:
                 result["invalid_reason"] = "duplicate_tag_id"
+        if self.single_pose_calls:
+            result['single_tag_fallback'] = {'calls': self.single_pose_calls,
+                                            'pose_ms': self.single_pose_ms,
+                                            'devices': sorted(self.single_pose_devices)}
         return {"detections": output, "localization": result}

@@ -110,6 +110,124 @@ def test_valid_calibration_is_content_addressed_and_previous_version_survives(co
     assert restarted.wait(1)
 
 
+def verified_poi_config(instance):
+    """Create an existing, explicitly acknowledged calibration without a restart."""
+    data=instance.get_config()
+    selected=data['pipelines'][0]
+    selected['calibration']='original-calibration.json'
+    selected['poi']={'enabled':True,'calibration_verified':True,
+                     'targets':[{'name':'aim','tag_id':7,'offset_m':[0,0,.2]}]}
+    (instance.path.parent/selected['calibration']).write_text(json.dumps(calibration()))
+    instance.path.write_text(yaml.safe_dump(data))
+    return data
+
+
+def test_identical_calibration_upload_preserves_verification_and_artifact(controller):
+    instance,_=controller
+    before=verified_poi_config(instance)
+    # JSON ordering/formatting does not change the calibration's identity.
+    reordered=dict(reversed(list(calibration().items())))
+    result=instance.upload_calibration('front_tags',reordered)
+    saved=instance.get_config()['pipelines'][0]
+    assert saved['calibration']==before['pipelines'][0]['calibration']
+    assert saved['poi']['calibration_verified'] is True
+    assert result['poi_verification_reset']==[]
+    assert not (instance.path.parent.parent/'calibration').exists()
+
+
+def test_new_calibration_upload_clears_old_acknowledgement_then_allows_reverification(controller):
+    instance,_=controller
+    before=verified_poi_config(instance)
+    replacement=calibration()
+    replacement['camera_matrix'][0][0]=515
+    result=instance.upload_calibration('front_tags',replacement)
+    saved=instance.get_config()
+    assert saved['pipelines'][0]['calibration']!=before['pipelines'][0]['calibration']
+    assert saved['pipelines'][0]['poi']['calibration_verified'] is False
+    assert result['poi_verification_reset']==['front_tags']
+    assert 'verification cleared' in result['message']
+    # A later, explicit acknowledgement of the selected calibration is retained.
+    saved['pipelines'][0]['poi']['calibration_verified']=True
+    instance.apply_config(saved)
+    result=instance.upload_calibration('front_tags',replacement)
+    assert instance.get_config()['pipelines'][0]['poi']['calibration_verified'] is True
+    assert result['poi_verification_reset']==[]
+
+
+@pytest.mark.parametrize('replacement_kind',['new_path','removed'])
+def test_raw_config_calibration_change_resets_verification_before_backend_validation(controller,replacement_kind):
+    instance,_=controller
+    submitted=verified_poi_config(instance)
+    if replacement_kind=='new_path':
+        submitted['pipelines'][0]['calibration']='another-calibration.json'
+        (instance.path.parent/'another-calibration.json').write_text(json.dumps(calibration()))
+    else:
+        submitted['pipelines'][0]['calibration']=None
+    validations=[]
+    instance.validate_runtime=validations.append
+    result=instance.apply_config(submitted)
+    assert result['poi_verification_reset']==['front_tags']
+    assert instance.get_config()['pipelines'][0]['poi']['calibration_verified'] is False
+    assert validations[0]['pipelines'][0]['poi']['calibration_verified'] is False
+    assert submitted['pipelines'][0]['poi']['calibration_verified'] is True
+
+
+def test_equivalent_calibration_path_keeps_current_acknowledgement(controller):
+    instance,_=controller
+    submitted=verified_poi_config(instance)
+    submitted['pipelines'][0]['calibration']=str((instance.path.parent/'original-calibration.json').resolve())
+    result=instance.apply_config(submitted)
+    assert result['poi_verification_reset']==[]
+    assert instance.get_config()['pipelines'][0]['poi']['calibration_verified'] is True
+
+
+@pytest.mark.parametrize('route',['upload','raw_config'])
+def test_rejected_calibration_change_keeps_old_file_and_acknowledgement(controller,route):
+    instance,restarted=controller
+    submitted=verified_poi_config(instance)
+    original=instance.path.read_bytes()
+    validations=[]
+    def reject(config):
+        validations.append(config)
+        raise RuntimeError('Backend unavailable')
+    instance.validate_runtime=reject
+    replacement=calibration()
+    replacement['camera_matrix'][0][0]=515
+    with pytest.raises(RuntimeError,match='Backend unavailable'):
+        if route=='upload':
+            instance.upload_calibration('front_tags',replacement)
+        else:
+            (instance.path.parent/'replacement.json').write_text(json.dumps(replacement))
+            submitted['pipelines'][0]['calibration']='replacement.json'
+            instance.apply_config(submitted)
+    assert validations[0]['pipelines'][0]['poi']['calibration_verified'] is False
+    assert instance.path.read_bytes()==original
+    assert instance.get_config()['pipelines'][0]['poi']['calibration_verified'] is True
+    assert not list(instance.path.parent.glob('.pending-*'))
+    assert not restarted.is_set()
+
+
+def test_failed_atomic_calibration_save_keeps_old_acknowledgement(controller,monkeypatch):
+    from custom_vision import control
+    instance,restarted=controller
+    verified_poi_config(instance)
+    original=instance.path.read_bytes()
+    replace=control.os.replace
+    def reject_config_write(source,destination):
+        if Path(destination)==instance.path:
+            raise OSError('config replacement failed')
+        return replace(source,destination)
+    monkeypatch.setattr(control.os,'replace',reject_config_write)
+    replacement=calibration()
+    replacement['camera_matrix'][0][0]=515
+    with pytest.raises(OSError,match='config replacement failed'):
+        instance.upload_calibration('front_tags',replacement)
+    assert instance.path.read_bytes()==original
+    assert instance.get_config()['pipelines'][0]['poi']['calibration_verified'] is True
+    assert not list(instance.path.parent.glob('.pending-*'))
+    assert not restarted.is_set()
+
+
 def test_field_upload_requires_complete_wpilib_layout_and_no_duplicate_ids(controller):
     instance, restarted = controller
     original = instance.path.read_bytes()

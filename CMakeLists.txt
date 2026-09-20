@@ -10,6 +10,8 @@ option(CUSTOM_VISION_NATIVE_CPU "Optimize for this computer's CPU; rebuild when 
 option(CUSTOM_VISION_CUDA_PREPROCESS "Enable optional OpenCV CUDA grayscale preprocessing" ON)
 option(CUSTOM_VISION_CUDA_APRILTAGS "Use optional NVIDIA cuAprilTags binary (JetPack 6, NVIDIA license)" OFF)
 
+option(CUSTOM_VISION_CUDA_POSE "Custom CUDA single-tag and joint MultiTag PnP" OFF)
+
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 # A private pinned static build prevents accidental linkage against old robot
@@ -38,6 +40,20 @@ endif()
 pybind11_add_module(_native MODULE native/apriltags.cpp)
 target_include_directories(_native SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(_native PRIVATE apriltag ${OpenCV_LIBS})
+if(CUSTOM_VISION_CUDA_POSE)
+  # A separate target keeps CPU-only flags (-mcpu/-march) away from nvcc.
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 87) # Jetson Orin; override for another GPU.
+  endif()
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  add_library(vision_cuda_pose STATIC native/cuda_pose.cu native/cuda_multitag.cu)
+  set_target_properties(vision_cuda_pose PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON POSITION_INDEPENDENT_CODE ON)
+  target_compile_options(vision_cuda_pose PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-O3>)
+  target_link_libraries(vision_cuda_pose PUBLIC CUDA::cudart)
+  target_link_libraries(_native PRIVATE vision_cuda_pose)
+  target_compile_definitions(_native PRIVATE CUSTOM_VISION_HAVE_CUDA_POSE=1)
+endif()
 if(CUSTOM_VISION_CUDA_APRILTAGS)
   set(CUAPRILTAGS_DIR "${CMAKE_BINARY_DIR}/_deps/cuapriltags")
   file(MAKE_DIRECTORY "${CUAPRILTAGS_DIR}")

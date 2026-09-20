@@ -58,6 +58,24 @@ recall for both devices and when adjusting decimation or thread count. Synthetic
 input is explicitly labeled **Synthetic preview**, and the frame footer reports
 the running detection mode rather than an unapplied setting.
 
+The separate **Pose device** selector controls single-tag PnP, joint field
+MultiTag and deferred single-tag fallback: CPU or the custom CUDA solvers. CUDA
+requires a native CUDA-pose build, 3D mode, matching intrinsics and 4/5/8-coefficient
+OpenCV pinhole distortion. It supports up to 256 observed mapped tags per joint
+solve. Unsupported CUDA configurations fail instead of silently using CPU PnP.
+The timing strip labels the single-tag and field solvers that actually ran;
+“single-tag pose not run” can accompany a valid CUDA field solve when individual
+poses were skipped. Choose by full processing latency and accuracy, not the GPU
+label alone. Coordinate transforms, POI projection and the UI remain CPU work.
+
+**Point of interest aiming** accepts named tag IDs with metric offsets from each
+tag's center, in configured priority order. Tag axes are X out of the printed
+front, Y right when viewing the upright tag, and Z up. Its tx/ty bearings remain
+independent of field localization. The calibration verification checkbox stays
+off until physically checked; replacing calibration clears the old acknowledgement.
+Orange **PREVIEW ONLY** points never publish a valid aim flag. The
+[POI guide](POI_AND_CUDA_POSE.md) provides examples and the NetworkTables contract.
+
 ## Object setup
 
 Selecting an object pipeline shows object settings and its target plane instead
@@ -100,6 +118,9 @@ counterclockwise). Overlays are drawn in raw camera coordinates before display
 rotation. Detection, calibration, corners, and NetworkTables results always use
 the unrotated capture frame.
 
+For AprilTags, **3D box depth / tag size** changes the preview prism: 0.5 is the
+original short box and 1.0 is a cube. It changes only drawing geometry.
+
 The inference thread stores only the latest frame reference and result. A separate
 worker draws overlays, resizes, rotates and compresses JPEGs at the configured
 preview cap. It discards obsolete pending frames and stops compressing when no
@@ -110,6 +131,10 @@ but consumes CPU and network; benchmark both with and without viewers.
 
 The displayed latency begins at host frame receipt, **not sensor exposure**.
 Exposure, USB transfer and robot fusion delay need a physical measurement.
+**Processed FPS** measures the smoothed interval between completed frames, not
+sensor FPS, preview FPS, or the inverse of processing latency. It clears to zero
+on disconnect. The stage strip separates detection, single-tag pose, field/POI
+work and queue delay; object pipelines show their own inference/geometry stages.
 `GET /api/preview` reports preview encode time, dimensions and frame IDs separately
 from the inference/publication timing returned by `GET /api/status`.
 

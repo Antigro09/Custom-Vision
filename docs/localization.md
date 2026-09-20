@@ -69,10 +69,10 @@ calibration the angles use a pinhole approximation with nominal FOV and carry
 Single-tag PnP evaluates both planar solutions, rejects negative depth, and
 reports distorted-pixel RMS reprojection error. Its ambiguity is the ratio of
 the two errors **before refinement**. Only the best branch is then refined;
-refining both can collapse distinct branches and obscure ambiguity. The solver
-internally rotates its corner basis to avoid a numerical rotation-near-pi
-singularity, then restores the decoded tag frame. The returned corner order
-never changes.
+refining both can collapse distinct branches and obscure ambiguity. The CPU
+implementation internally rotates its corner basis to avoid a numerical
+rotation-near-pi singularity, then restores the decoded tag frame. The CUDA path
+uses its own square-IPPE implementation. Both preserve the decoded corner order.
 
 `pose_valid` means the target PnP fit passed its checks. It does not mean the
 orientation is unambiguous. `pose_ambiguity`, `pose_ambiguous`, and the alternate
@@ -82,13 +82,28 @@ error in both branches; it is rejected as ambiguous rather than assigned false
 certainty. The ambiguity ratio is not a position covariance. [PhotonVision describes the planar ambiguity problem and 0.2 rejection threshold](https://docs.photonvision.org/en/latest/docs/apriltag-pipelines/3D-tracking.html).
 
 With `multitag: true` (default) and two or more known IDs in one image, the system
-fits all their field corners jointly. It uses a planar solver when the geometry
-is coplanar and SQPnP otherwise, then refines the accepted fit. RANSAC and
-single-tag hypotheses are evaluated only when the direct fit disagrees. Inliers
-are **whole tags**, so accepting a few corners of a bad detection does not turn
-it into a MultiTag observation. Bad tags are reported in `rejected_tag_ids`.
-Duplicate observed IDs are excluded from field localization. Unknown IDs still
-provide independent target-relative observations.
+fits their field corners jointly. `settings.pose_device` selects CPU or CUDA for
+both single-tag and joint fitting, including deferred single-tag calls.
+
+The CPU path uses a planar solver for coplanar geometry and SQPnP otherwise,
+then refines the accepted fit. CPU RANSAC and single-tag hypotheses are evaluated
+only when the direct fit disagrees. The CUDA path computes tag-derived dual IPPE
+seeds, shared planar initialization, whole-tag consensus and joint nonlinear
+refinement from deterministic starting poses on the GPU. It does not use CPU
+PnP seeds or fallback, and its finite candidate set is not proof that every
+possible solution was found. CUDA supports 4/5/8-coefficient pinhole distortion
+and 2–256 observed mapped tags per joint call; unsupported configurations fail
+explicitly. Coordinate transforms and publication remain CPU work.
+
+Inliers are **whole tags**, so accepting a few corners of a bad detection does
+not turn it into a MultiTag observation. Bad tags are reported in
+`rejected_tag_ids`. Duplicate observed IDs are excluded from field localization.
+Unknown IDs still provide independent target-relative observations through the
+selected single-tag solver. `localization.pose_device` reports the actual field
+solver. CUDA accepted-tag residuals are computed on the GPU, published in
+`tag_reprojection_errors_px`, and reused when deriving target poses. See the
+[CUDA pose guide](POI_AND_CUDA_POSE.md#joint-mapped-multitag-on-cuda) for algorithm
+limits and nested native/kernel timing.
 
 Two mutually inconsistent known tags produce an invalid field result; there is
 no arbitrary choice of which map entry to trust. With one usable known tag, or

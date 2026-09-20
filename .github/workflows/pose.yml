@@ -1,0 +1,52 @@
+name: Pose and POI
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+    paths: ['native/**', 'custom_vision/**', 'tests/**', 'scripts/**', 'CMakeLists.txt', '.github/workflows/pose.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  cuda-compile:
+    runs-on: ubuntu-22.04
+    container: nvidia/cuda:12.6.3-devel-ubuntu22.04
+    timeout-minutes: 20
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CPU test dependencies inside disposable CUDA build container
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git cmake g++ libopencv-dev python3-dev python3-pip
+          python3 -m pip install -e '.[desktop,test]' pybind11==2.13.6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Compile actual CUDA source for Orin sm_87, without needing a GPU
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p logs/pose-ci
+          nvcc --version > logs/pose-ci/nvcc.txt
+          VISION_PYTHON=$(which python3) bash scripts/build_native.sh \
+            -DCUSTOM_VISION_CUDA_POSE=ON -DCMAKE_CUDA_ARCHITECTURES=87 \
+            -DCUSTOM_VISION_CUDA_APRILTAGS=OFF -DCUSTOM_VISION_CUDA_PREPROCESS=OFF 2>&1 | tee logs/pose-ci/build.txt
+          python3 -c 'from custom_vision.native_apriltags import native_capabilities; import json; print(json.dumps(native_capabilities(),indent=2))' > logs/pose-ci/capabilities.json
+      - name: All CPU tests plus real-GPU cases that explicitly skip without hardware
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 -m pytest -q -ra --junitxml=logs/pose-ci/junit.xml 2>&1 | tee logs/pose-ci/pytest.txt
+          node --test tests/dashboard_client.test.cjs
+          python3 scripts/smoke_test.py
+          python3 scripts/smoke_objects.py
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: pose-cuda-compile-and-cpu-tests
+          path: logs/pose-ci/
+          retention-days: 14

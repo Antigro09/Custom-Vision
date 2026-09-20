@@ -32,6 +32,8 @@ def preview_settings(settings, name='preview'):
     for key, low, high in [('stream_fps', 1, 30), ('stream_width', 160, 1920), ('jpeg_quality', 20, 95)]:
         if key in settings:
             finite(settings[key], f'{name}.{key}', low, high, integer=key != 'stream_fps')
+    if 'box_depth_ratio' in settings:
+        finite(settings['box_depth_ratio'], f'{name}.box_depth_ratio', .1, 2.)
     if settings.get('rotation_deg', 0) not in (0,90,180,270):
         raise ValueError(f'{name}.rotation_deg must be 0, 90, 180 or 270')
 
@@ -79,6 +81,14 @@ def validate_config(data, directory):
                 pipeline['calibration_data']=json.load(stream)
         settings=mapping(pipeline.setdefault('settings',{}),'settings')
         if pipeline['type']=='apriltag':
+            from .poi import validate_poi
+            validate_poi(pipeline.get('poi'))
+            if settings.get('pose_device','cpu') not in ('cpu','cuda'):
+                raise ValueError('pose_device must be cpu or cuda')
+            if settings.get('pose_device','cpu') == 'cuda' and settings.get('backend','pupil') != 'native':
+                raise ValueError('CUDA pose requires the native backend')
+            if 'cuda_pose_iterations' in settings:
+                finite(settings['cuda_pose_iterations'],'cuda_pose_iterations',1,100,True)
             if settings.get('backend','pupil') not in ('native','pupil'):
                 raise ValueError('AprilTag backend must be native or pupil')
             if settings.get('mode','3d') not in ('2d','3d'):

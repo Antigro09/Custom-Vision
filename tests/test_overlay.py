@@ -109,3 +109,58 @@ def test_object_overlay_preserves_apriltag_projection():
     tag_pixels = tags_only.any(axis=2)
     assert np.array_equal(tags_only[tag_pixels], mixed[tag_pixels])
     assert np.count_nonzero(mixed) > np.count_nonzero(tags_only)
+
+
+def test_box_depth_ratio_changes_only_projected_depth(monkeypatch):
+    calibration, detection = fixture()
+    frame = np.zeros((480, 640, 3), np.uint8)
+    projections = []
+    project_points = cv2.projectPoints
+
+    def record_projection(points, *args, **kwargs):
+        projections.append(points.copy())
+        return project_points(points, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "projectPoints", record_projection)
+    short = annotate(frame, [detection], calibration, box_depth_ratio=.5)
+    cube = annotate(frame, [detection], calibration, box_depth_ratio=1.)
+    assert len(projections) == 2
+    np.testing.assert_array_equal(projections[0][:4], projections[1][:4])
+    np.testing.assert_allclose(projections[0][4:8, 2], -.1651 / 2)
+    np.testing.assert_allclose(projections[1][4:8, 2], -.1651)
+    np.testing.assert_allclose(np.ptp(projections[1][:8], axis=0), [.1651] * 3)
+    assert not np.array_equal(short, cube)
+    assert not frame.any()
+
+
+def test_poi_overlay_uses_raw_pixels_and_distinguishes_preview_only(monkeypatch):
+    calibration, _ = fixture()
+    frame = np.zeros((480, 640, 3), np.uint8)
+    labels = []
+    monkeypatch.setattr(cv2, "putText", lambda _frame, text, *_args, **_kwargs: labels.append(text))
+    poi = {"valid": True, "targets": [
+        {"name": "aim", "pixel": [200, 180], "valid": True, "geometry_valid": True, "in_image": True},
+        {"name": "uncertain", "pixel": [400, 280], "valid": False, "geometry_valid": True, "in_image": True},
+    ]}
+    result = annotate(frame, [], calibration, poi=poi)
+    np.testing.assert_array_equal(result[180, 200], [200, 80, 255])
+    np.testing.assert_array_equal(result[280, 400], [0, 180, 255])
+    assert labels == ["POI aim", "POI uncertain PREVIEW ONLY"]
+    assert not frame.any()
+
+
+def test_poi_overlay_rejects_unprojectable_or_mismatched_geometry():
+    calibration, _ = fixture()
+    frame = np.zeros((480, 640, 3), np.uint8)
+    entries = [
+        {"pixel": [200, 180], "geometry_valid": False, "in_image": True},
+        {"pixel": [200, 180], "geometry_valid": True, "in_image": False},
+        {"pixel": [float("nan"), 180], "geometry_valid": True, "in_image": True},
+        {"pixel": [200, 180, 0], "geometry_valid": True, "in_image": True},
+        {"pixel": [-1, 180], "geometry_valid": True, "in_image": True},
+    ]
+    assert np.array_equal(annotate(frame, [], calibration, poi={"targets": entries}), frame)
+    valid = {"targets": [{"pixel": [200, 180], "geometry_valid": True, "in_image": True}]}
+    assert np.array_equal(annotate(frame, [], poi=valid), frame)
+    calibration["width"] = 800
+    assert np.array_equal(annotate(frame, [], calibration, poi=valid), frame)

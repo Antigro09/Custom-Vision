@@ -89,8 +89,11 @@ $('mount-measured').onchange = updateMountInputs;
 function updateDetectorDevice() {
   $('tag-device').disabled = selectedPipeline()?.type !== 'apriltag' || $('tag-backend').value !== 'native';
   if ($('tag-backend').value !== 'native') value('tag-device', 'cpu');
+  $('pose-device').disabled = selectedPipeline()?.type !== 'apriltag' || $('tag-backend').value !== 'native' || $('tag-mode').value === '2d';
+  if ($('pose-device').disabled) value('pose-device','cpu');
 }
 $('tag-backend').onchange = updateDetectorDevice;
+$('tag-mode').onchange = updateDetectorDevice;
 const objectNeuralFields = ['object-task','object-format','object-model','object-labels','object-width','object-height','object-confidence'];
 function updateObjectBackend() {
   const neural = ['tensorrt', 'opencv_onnx'].includes($('object-backend').value);
@@ -120,7 +123,13 @@ function populatePipeline() {
   state.devices.forEach(d => option($('device-select'), `${d.source} · ${d.name}`, d.source, device === d));
   populateModes(device, camera); populateControls(device, camera.controls || {});
   value('tag-mode', tags.mode || '3d'); value('tag-backend', tags.backend || 'native');
-  value('tag-device', tags.detector_device || 'cpu'); updateDetectorDevice();
+  value('tag-device', tags.detector_device || 'cpu'); value('pose-device', tags.pose_device || 'cpu'); updateDetectorDevice();
+  const poi = pipeline.poi || {};
+  $('poi-enabled').checked = poi.enabled === true; $('poi-verified').checked = poi.calibration_verified === true;
+  value('poi-targets', JSON.stringify(poi.targets || [], null, 2));
+  for (const id of ['poi-enabled','poi-verified','poi-targets']) $(id).disabled = isObject;
+  $('box-depth-field').hidden = isObject; $('box-depth-note').hidden = isObject;
+  $('box-depth').disabled = isObject;
   value('tag-size', tags.tag_size_m ?? .1651); value('tag-threads', tags.threads ?? 2);
   value('tag-decimate', tags.quad_decimate ?? 1); value('tag-margin', tags.min_decision_margin ?? 20);
   $('multitag').checked = tags.multitag !== false;
@@ -140,7 +149,7 @@ function populatePipeline() {
   ['mount-x','mount-y','mount-z'].forEach((id, i) => value(id, translation[i]));
   ['mount-roll','mount-pitch','mount-yaw'].forEach((id, i) => value(id, rotation[i]));
   value('preview-rotation', preview.rotation_deg ?? 0); value('preview-fps', preview.stream_fps ?? 10);
-  value('preview-width', preview.stream_width ?? 640); value('preview-quality', preview.jpeg_quality ?? 70);
+  value('preview-width', preview.stream_width ?? 640); value('preview-quality', preview.jpeg_quality ?? 70); value('box-depth', preview.box_depth_ratio ?? .5);
   $('calibration-path').textContent = pipeline.calibration || 'No calibration uploaded';
   $('field-path').textContent = state.config.field_layout || 'No field layout uploaded';
   const nt = state.config.networktables || {};
@@ -180,7 +189,7 @@ function collectSettings() {
     if (element.value === '') delete controls[name]; else controls[name] = Number(element.value);
   }
   p.camera.controls = controls;
-  if (p.type === 'apriltag') p.settings = {...p.settings, mode: $('tag-mode').value, backend: $('tag-backend').value, detector_device: $('tag-device').value || 'cpu', tag_size_m: n('tag-size'), threads: n('tag-threads'), quad_decimate: n('tag-decimate'), min_decision_margin: n('tag-margin'), multitag: $('multitag').checked};
+  if (p.type === 'apriltag') p.settings = {...p.settings, mode: $('tag-mode').value, backend: $('tag-backend').value, detector_device: $('tag-device').value || 'cpu', pose_device: $('pose-device').value || 'cpu', tag_size_m: n('tag-size'), threads: n('tag-threads'), quad_decimate: n('tag-decimate'), min_decision_margin: n('tag-margin'), multitag: $('multitag').checked};
   else {
     p.settings = {...p.settings, backend: $('object-backend').value, max_detections: n('object-limit')};
     if (['tensorrt', 'opencv_onnx'].includes(p.settings.backend)) Object.assign(p.settings, {
@@ -193,8 +202,15 @@ function collectSettings() {
       anchor: $('object-anchor').value, max_range_m: n('object-max-range'), max_position_std_m: n('object-max-std'),
       intake_offset_m: [n('object-intake-x'), n('object-intake-y')], approach_standoff_m: n('object-standoff')};
   }
+  if (p.type === 'apriltag') {
+    let targets;
+    try { targets = JSON.parse($('poi-targets').value || '[]'); } catch (_) { throw new Error('POI targets must be a valid JSON array'); }
+    if (!Array.isArray(targets)) throw new Error('POI targets must be a JSON array');
+    p.poi = {...p.poi, enabled: $('poi-enabled').checked, calibration_verified: $('poi-verified').checked, targets};
+  }
   p.robot_to_camera = $('mount-measured').checked ? {translation_m: ['mount-x','mount-y','mount-z'].map(n), rotation_rpy_deg: ['mount-roll','mount-pitch','mount-yaw'].map(n)} : null;
   p.preview = {...p.preview, rotation_deg: n('preview-rotation'), stream_fps: n('preview-fps'), stream_width: n('preview-width'), jpeg_quality: n('preview-quality')};
+  if (p.type === 'apriltag') p.preview.box_depth_ratio = n('box-depth');
   return config;
 }
 function applyMessage(result) {
@@ -242,12 +258,47 @@ function updateStatus() {
   $('target-count-label').textContent = isObject ? 'Visible objects' : 'Visible tags';
   $('pose-label').textContent = isObject ? 'Object geometry' : 'Pose estimate';
   $('object-selection').hidden = !isObject;
-  $('frame-id').textContent = connected ? status.frame_id ?? '—' : '—';
+  const fps = connected && Number.isFinite(status.fps) && status.fps >= 0 ? status.fps : null;
+  const fpsText = fps === null ? '—' : fps.toFixed(1);
+  $('processing-fps').textContent = connected ? fpsText : '0.0';
+  const ms = x => Number.isFinite(x) && x >= 0 ? x.toFixed(2) : '—';
+  let stageTimings = 'Awaiting data';
+  if (connected) {
+    if (isObject) {
+      const times = status.inference_timings || {};
+      stageTimings = ['tensorrt', 'opencv_onnx'].includes(backend)
+        ? `Preprocess ${ms(times.preprocess_ms)} ms · inference ${ms(times.inference_ms)} ms · decode ${ms(times.decode_ms)} ms`
+        : `Detect ${ms(status.detector_ms)} ms`;
+      stageTimings += ` · geometry ${ms(status.localization_ms)} ms`;
+    } else {
+      const times = status.native_timings || {};
+      const poseDevice = {cuda: 'CUDA', cpu: 'CPU', mixed: 'CPU + CUDA'}[status.pose_device] || 'device unreported';
+      if (status.mode === '2d' || status.pose_device === 'none') {
+        stageTimings = `Detect ${ms(times.detect_ms ?? status.detector_ms)} ms · single-tag pose not run${status.mode === '2d' ? ' (2D)' : ''}`;
+      } else if (Number.isFinite(times.detect_ms) || Number.isFinite(times.pose_ms)) {
+        stageTimings = `Detect ${ms(times.detect_ms)} ms · single-tag pose ${ms(status.single_tag_pose_ms ?? times.pose_ms)} ms (${poseDevice})`;
+      } else {
+        stageTimings = `Detection + single-tag pose ${ms(status.detector_ms)} ms (${poseDevice})`;
+      }
+      const fieldPoseDevice = {cpu: 'CPU', cuda: 'CUDA', mixed: 'CPU + CUDA'}[status.localization?.pose_device];
+      stageTimings += ` · localization / POI ${ms(status.localization_ms)} ms${fieldPoseDevice ? ` (field solve ${fieldPoseDevice})` : ''}`;
+    }
+    stageTimings += ` · queue ${ms(status.queue_ms)} ms`;
+  }
+  $('pipeline-timings').textContent = stageTimings;
+  const poi = connected ? status.poi : null;
+  const aim = poi?.valid ? poi.targets?.find(x => x.valid && x.name === poi.selected_name) : null;
+  const previewAim = aim || poi?.targets?.find(x => x.geometry_valid);
+  $('poi-status').hidden = isObject || (!selectedPipeline()?.poi?.enabled && !poi?.targets?.length);
+  $('poi-selected').textContent = aim ? `${aim.name} · tag ${aim.tag_id}` : previewAim ? `${previewAim.name} · PREVIEW ONLY` : 'No valid POI';
+  $('poi-angles').textContent = previewAim && Number.isFinite(previewAim.tx_deg) && Number.isFinite(previewAim.ty_deg)
+    ? `tx ${previewAim.tx_deg.toFixed(2)}° right · ty ${previewAim.ty_deg.toFixed(2)}° up${aim ? '' : ' · ' + (previewAim.invalid_reason || 'unverified').replaceAll('_',' ')}`
+    : 'Requires a currently visible tag with an unambiguous pose and validated intrinsics.';
   const localization = status?.localization || status?.field_pose || status?.robot_pose;
   const pose = connected && localization?.valid === true && localization?.field_to_camera;
   $('pose-state').textContent = !connected ? 'Awaiting data' : (pose ? (localization.field_to_robot ? 'Robot field pose available' : 'Camera field pose · mount not measured') : (status.detections?.some(d => d.pose_valid && d.camera_to_target) ? 'Camera-relative pose available' : 'No field pose'));
   $('pose-note').textContent = status?.error || status?.localization_error || localization?.invalid_reason?.replaceAll('_', ' ') || '3D uses matched calibration; multi-tag uses known field coordinates and the measured camera mounting transform.';
-  $('frame-label').textContent = connected ? `Frame ${status.frame_id ?? '—'} · ${status.mode || 'unknown'} detection` : (status?.error || 'No frame received');
+  $('frame-label').textContent = connected ? `${fpsText} processed FPS · ${status.mode || 'unknown'} detection` : (status?.error || 'No frame received');
   if (isObject) {
     const objects = connected ? status?.objects : null;
     const selected = objects?.valid === true && objects.selected_target?.valid === true ? objects.selected_target : null;
@@ -263,7 +314,7 @@ function updateStatus() {
       ? `X ${position[0].toFixed(2)} m forward · Y ${position[1].toFixed(2)} m left · range ${selected.range_xy_m.toFixed(2)} m${Number.isFinite(selected.uncertainty?.max_position_std_m) ? ` · uncertainty ${selected.uncertainty.max_position_std_m.toFixed(2)} m` : ''}`
       : 'No current robot-relative target.';
     const detectionLabel = {detect: 'box detection', segment: 'instance segmentation'}[status?.task || status?.mode] || 'object detection';
-    $('frame-label').textContent = connected ? `Frame ${status.frame_id ?? '—'} · ${detectionLabel}` : (status?.error || 'No frame received');
+    $('frame-label').textContent = connected ? `${fpsText} processed FPS · ${detectionLabel}` : (status?.error || 'No frame received');
   }
   $('raw-results').textContent = JSON.stringify(status || {}, null, 2);
   if (!connected) hideFrame();

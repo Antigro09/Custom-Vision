@@ -2,6 +2,7 @@
 import json
 
 import ntcore
+import pytest
 
 from custom_vision.publisher import Publisher
 
@@ -126,3 +127,50 @@ def test_object_wire_targets_remain_coherent_without_mutating_dashboard_payload(
     assert canonical['approach']['translation_m']==[.8,.2,0]
     assert data['objects']['selected_target'] is target
     assert data['detections'][0]['robot_relative']['translation_m'][0]==1.23456789
+
+
+@pytest.mark.parametrize('invalidation', ['absent','invalid','wrong_selection','disconnected','preview_only'])
+def test_poi_topics_clear_every_metric_when_selected_target_is_not_valid(invalidation):
+    pub=Publisher({'enabled':False})
+    pub.instance=Instance(None)
+    data=packet()
+    aim={'valid':True,'name':'speaker','tag_id':7,'tx_deg':12.5,'ty_deg':5.,
+         'camera_translation_m':[.5,-.2,2.], 'robot_translation_m':[2.2,-.5,.7],
+         'robot_yaw_deg':-12.8}
+    data.update(fps=58.2,poi={'valid':True,'selected_name':'speaker','targets':[aim]})
+    pub.publish(data)
+    topics=pub.instance.topics
+    assert topics['poi_valid'].value is True
+    assert topics['poi_name'].value=='speaker'
+    assert topics['poi_tag_id'].value==7
+    assert topics['poi_tx_deg'].value==12.5 and topics['poi_ty_deg'].value==5.
+    assert topics['poi_camera_xyz'].value==[.5,-.2,2.]
+    assert topics['poi_robot_xyz'].value==[2.2,-.5,.7]
+    assert topics['poi_robot_yaw_deg'].value==[-12.8]
+    assert topics['fps'].value==58.2
+    if invalidation=='absent':data.pop('poi')
+    elif invalidation=='invalid':data['poi']['valid']=False
+    elif invalidation=='wrong_selection':data['poi']['selected_name']='other'
+    elif invalidation=='disconnected':data['connected']=False
+    else:aim.update(valid=False,geometry_valid=True,calibration_verified=False)
+    pub.publish(data)
+    assert topics['poi_valid'].value is False
+    assert topics['poi_name'].value=='' and topics['poi_tag_id'].value==-1
+    assert topics['poi_tx_deg'].value==0. and topics['poi_ty_deg'].value==0.
+    for key in ('poi_camera_xyz','poi_robot_xyz','poi_robot_yaw_deg'):
+        assert topics[key].value==[]
+    if invalidation=='disconnected':assert topics['fps'].value==0.
+
+
+def test_poi_missing_mount_keeps_camera_aim_without_inventing_robot_coordinates():
+    pub=Publisher({'enabled':False})
+    pub.instance=Instance(None)
+    data=packet()
+    data['poi']={'valid':True,'selected_name':'aim','targets':[
+        {'valid':True,'name':'aim','tag_id':7,'tx_deg':3.,'ty_deg':4.,
+         'camera_translation_m':[.1,-.1,2.],'robot_translation_m':None,'robot_yaw_deg':None}]}
+    pub.publish(data)
+    topics=pub.instance.topics
+    assert topics['poi_valid'].value is True
+    assert topics['poi_camera_xyz'].value==[.1,-.1,2.]
+    assert topics['poi_robot_xyz'].value==[] and topics['poi_robot_yaw_deg'].value==[]

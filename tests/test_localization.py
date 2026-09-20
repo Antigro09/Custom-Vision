@@ -78,6 +78,29 @@ def pose_matrix(pose):
     return result
 
 
+def test_deferred_single_pose_fallback_reports_actual_device_and_does_not_retry(calibration):
+    localizer = Localization({}, calibration)
+    calls = []
+
+    def rejected_gpu_pose(corners):
+        calls.append(corners)
+        return {'pose_valid': False, 'pose_attempted': True, 'pose_device': 'cuda',
+                'pose_invalid_reason': 'reprojection_error', 'pose_source': 'single_tag_cuda_ippe'}
+
+    localizer.single_pose_solver = rejected_gpu_pose
+    detection = {'id': 7, 'center': [640., 400.],
+                 'corners': [[620., 420.], [660., 420.], [660., 380.], [620., 380.]],
+                 'pose_valid': False, 'pose_attempted': False, 'pose_device': 'none',
+                 'pose_invalid_reason': 'deferred_multitag'}
+    result = localizer.enrich([detection], (800, 1280, 3))
+    fallback = result['localization']['single_tag_fallback']
+    assert fallback['calls'] == 1 and fallback['devices'] == ['cuda'] and fallback['pose_ms'] >= 0
+    assert result['detections'][0]['pose_device'] == 'cuda'
+    localizer._ensure_single(result['detections'][0])
+    assert len(calls) == 1
+    assert 'single_tag_fallback' not in localizer.enrich([], (800, 1280, 3))['localization']
+
+
 @pytest.fixture
 def scene():
     camera = transform([2., 3., .7], [1., -4., 17.])
@@ -105,6 +128,29 @@ def test_joint_nonplanar_pnp_recovers_absolute_field_camera(calibration, scene):
                                    np.linalg.inv(camera) @ tags[detection["id"]], atol=1e-6)
         assert detection["robot_to_target"] is None
     json.dumps(result, allow_nan=False)
+
+
+def test_joint_pose_does_not_reuse_prior_single_tag_alternate(calibration, scene):
+    camera, tags = scene
+    detections = project_scene(tags, camera, calibration)
+    alternate_keys = {'alternate_rvec_rad', 'alternate_tvec_m', 'alternate_reprojection_error_px'}
+    for detection in detections:
+        detection.update(estimate_tag_pose(detection['corners'], SIZE,
+                         np.asarray(calibration['camera_matrix']), np.asarray(calibration['dist_coeffs'])))
+        assert detection['pose_valid'] and alternate_keys.issubset(detection)
+    before = copy.deepcopy(detections)
+    result = Localization({}, calibration, layout_for(tags)).enrich(detections, (800, 1280))
+    assert result['localization']['valid']
+    for detection in result['detections']:
+        assert detection['pose_source'] == 'field_layout_multitag'
+        assert detection['pose_ambiguity'] == result['localization']['ambiguity']
+        assert not alternate_keys.intersection(detection)
+    # The original single-tag packet is still suitable for independent POI
+    # processing, and explicitly requested single poses keep their alternates.
+    assert detections == before
+    singles = Localization({'always_single_tag': True}, calibration, layout_for(tags)).enrich(
+        detections, (800, 1280))
+    assert all(alternate_keys.issubset(detection) for detection in singles['detections'])
 
 
 def test_robot_mount_rotates_translation_and_uses_inverse(calibration, scene):

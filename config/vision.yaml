@@ -1,5 +1,5 @@
 # Team 1086 AprilTag Jetson profile. Copy to local.yaml for robot-specific edits.
-# Paths resolve relative to this YAML. Object implementation is frozen pending design approval.
+# Paths resolve relative to this YAML. Trained object weights are supplied by the team.
 networktables:
   enabled: true
   team: 1086
@@ -35,6 +35,7 @@ pipelines:
       backend: native
       mode: 3d
       detector_device: cpu  # Select cuda in the UI after comparing recorded camera scenes.
+      pose_device: cpu  # Independent CUDA PnP is available; compare latency before enabling.
       preprocess: cpu  # CPU vs CUDA is benchmarked; GPU preprocessing is optional.
       tag_family: tag36h11
       tag_size_m: 0.1651

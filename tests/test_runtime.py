@@ -134,6 +134,116 @@ def test_camera_failure_clears_previous_target(monkeypatch):
     assert camera.released
 
 
+def test_frame_timings_survive_pose_only_localization_and_poi_precedes_field_pose(monkeypatch):
+    runtime = fake_runtime()
+    cfg = runtime.groups['0'][0][0]
+    cfg['settings']['pose_device'] = 'cuda'
+    raw = {'id': 7, 'center': [16, 12], 'pose_valid': True,
+           'pose_attempted': True, 'pose_source': 'single_tag_cuda_ippe'}
+    calls = []
+
+    class Detector:
+        last_timings = {'detect_ms': 8., 'pose_ms': .4, 'total_ms': 8.4}
+
+        def process(self, frame):
+            return [raw]
+
+    detector = Detector()
+
+    class POI:
+        def process(self, detections, shape, captured):
+            assert detections[0]['pose_source'] == 'single_tag_cuda_ippe'
+            calls.append('poi')
+            return {'valid': False, 'targets': [], 'invalid_reason': 'test_fixture'}
+
+    class Localizer:
+        def enrich(self, detections, shape):
+            calls.append('localization')
+            # A native pose-only fallback overwrites the native timing record.
+            detector.last_timings = {'detect_ms': 0., 'pose_ms': .3, 'total_ms': .3}
+            return {'detections': [dict(raw, pose_source='field_layout_multitag', pose_device='cpu')],
+                    'localization': {'valid': True, 'pose_device': 'cpu'}}
+
+    detector.poi, detector.localization = POI(), Localizer()
+    runtime.groups['0'] = [(cfg, detector)]
+    camera = FakeCamera([(True, np.zeros((24, 32, 3), np.uint8))])
+    monkeypatch.setattr(app, 'open_camera', lambda _: camera)
+    runtime.camera_worker(runtime.groups['0'])
+    [payload] = runtime.publisher.payloads
+    assert calls == ['poi', 'localization']
+    assert payload['pose_device'] == 'cuda'
+    assert payload['localization']['pose_device'] == 'cpu'
+    assert payload['native_timings']['detect_ms'] == 8.
+    assert payload['native_timings']['pose_ms'] == .4
+
+
+@pytest.mark.parametrize('pipeline_type,mode', [('object', '3d'), ('apriltag', '2d')])
+def test_no_pose_execution_is_reported_when_not_run(monkeypatch, pipeline_type, mode):
+    runtime = fake_runtime()
+    cfg = runtime.groups['0'][0][0]
+    cfg['type'] = pipeline_type
+    cfg['settings'].update(mode=mode, pose_device='cuda')
+    camera = FakeCamera([(True, np.zeros((24, 32, 3), np.uint8))])
+    monkeypatch.setattr(app, 'open_camera', lambda _: camera)
+    runtime.camera_worker(runtime.groups['0'])
+    [payload] = runtime.publisher.payloads
+    assert payload['pose_device'] == 'none'
+
+
+def test_error_clears_fps_pose_device_and_poi():
+    runtime = fake_runtime()
+    cfg = runtime.groups['0'][0][0]
+    runtime.emit(cfg, 3, time.monotonic(), [], error='Camera unavailable',
+                 extras={'fps': 55., 'pose_device': 'cuda', 'poi': {'valid': True}})
+    [payload] = runtime.publisher.payloads
+    assert payload['fps'] == 0.
+    assert payload['pose_device'] == 'none'
+    assert payload['poi']['valid'] is False
+    assert payload['poi']['targets'] == []
+
+
+def test_deferred_cuda_fallback_is_included_in_runtime_pose_provenance(monkeypatch):
+    runtime = fake_runtime()
+    cfg = runtime.groups['0'][0][0]
+    cfg['settings']['pose_device'] = 'cuda'
+
+    class Localizer:
+        def enrich(self, detections, shape):
+            return {'detections': [], 'localization': {'valid': False, 'pose_device': 'cpu',
+                    'single_tag_fallback': {'calls': 1, 'devices': ['cuda'], 'pose_ms': .7}}}
+
+    class Detector(FakeDetector):
+        last_timings = {'detect_ms': 8., 'pose_ms': .01}
+        localization = Localizer()
+
+    runtime.groups['0'] = [(cfg, Detector())]
+    monkeypatch.setattr(app, 'open_camera', lambda _: FakeCamera([(True, np.zeros((24, 32, 3), np.uint8))]))
+    runtime.camera_worker(runtime.groups['0'])
+    [payload] = runtime.publisher.payloads
+    assert payload['pose_device'] == 'cuda'
+    assert payload['single_tag_pose_ms'] == pytest.approx(.71)
+    assert payload['native_timings']['pose_ms'] == .01
+
+
+def test_processed_fps_uses_frame_intervals_not_latency(monkeypatch):
+    runtime = fake_runtime(max_frames=3)
+    clock = [100.]
+
+    class Camera:
+        def read(self):
+            clock[0] += .020
+            return True, np.zeros((24, 32, 3), np.uint8)
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(app, 'open_camera', lambda _: Camera())
+    monkeypatch.setattr(app.time, 'monotonic', lambda: clock[0])
+    runtime.camera_worker(runtime.groups['0'])
+    assert [p['fps'] for p in runtime.publisher.payloads] == pytest.approx([0., 50., 50.])
+    assert all(p['latency_ms'] == 0. for p in runtime.publisher.payloads)
+
+
 def test_slow_inference_cannot_publish_expired_target(monkeypatch):
     runtime = fake_runtime()
     clock = [100.0]

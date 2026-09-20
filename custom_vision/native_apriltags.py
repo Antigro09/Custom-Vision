@@ -35,6 +35,7 @@ class NativeAprilTagPipeline:
         self.calibration = validate_calibration(calibration) if calibration is not None else None
         self.mode = config.get("mode", "3d")
         self.detector_device = config.get("detector_device", "cpu")
+        self.pose_device = config.get("pose_device", "cpu")
         self.tag_size_m = float(config.get("tag_size_m", 0.1651))
         try:
             from . import _native
@@ -49,6 +50,14 @@ class NativeAprilTagPipeline:
     def _estimate_pose(self, corners) -> dict:
         """Pose-only entry point for synthetic geometric verification."""
         return self._get_detector().estimate_pose(corners)
+
+    def estimate_poses(self, corners):
+        """Pose-only (N,4,2) batch, including transfers and result conversion."""
+        return self._get_detector().estimate_poses(corners)
+
+    def estimate_multitag(self, corners, field_corners):
+        """Joint CUDA field-to-optical-camera solve; no CPU seed or fallback."""
+        return self._get_detector().estimate_multitag(corners,field_corners)
 
     def _get_detector(self):
         detector = self.detector

@@ -3,6 +3,10 @@
 // (-1,+1), (+1,+1), (+1,-1), (-1,-1), also OpenCV IPPE_SQUARE order.
 // References: https://github.com/AprilRobotics/apriltag
 // https://docs.opencv.org/4.x/d5/d1f/calib3d_solvePnP.html
+#ifdef CUSTOM_VISION_HAVE_CUDA_POSE
+#include "cuda_pose.hpp"
+#include "cuda_multitag.hpp"
+#endif
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -174,6 +178,11 @@ public:
         const std::string device = config.contains("detector_device") ? py::cast<std::string>(config["detector_device"]) : "cpu";
         if (device != "cpu" && device != "cuda") throw py::value_error("detector_device must be cpu or cuda");
         cuda_detect_ = device == "cuda";
+        pose_device_ = config.contains("pose_device") ? py::cast<std::string>(config["pose_device"]) : "cpu";
+        if (pose_device_ != "cpu" && pose_device_ != "cuda") throw py::value_error("pose_device must be cpu or cuda");
+#ifndef CUSTOM_VISION_HAVE_CUDA_POSE
+        if (pose_device_ == "cuda") throw py::value_error("CUDA PnP not compiled; build with -DCUSTOM_VISION_CUDA_POSE=ON");
+#endif
 #ifndef CUSTOM_VISION_HAVE_CUAPRILTAGS
         if (cuda_detect_) throw py::value_error("CUDA AprilTag detector is not compiled; build with -DCUSTOM_VISION_CUDA_APRILTAGS=ON on JetPack 6");
 #else
@@ -201,6 +210,18 @@ public:
             const auto coefficients = py::cast<std::vector<double>>(checked["dist_coeffs"]);
             distortion_ = cv::Mat(coefficients, true);
         }
+#ifdef CUSTOM_VISION_HAVE_CUDA_POSE
+        if (pose_device_ == "cuda") {
+            if (camera_matrix_.empty() || mode_ != "3d") throw py::value_error("CUDA PnP requires 3d mode and matching intrinsics");
+            if (distortion_.total() > 8) throw py::value_error("CUDA PnP supports OpenCV 4/5/8 distortion coefficients only");
+            vision_pose::Camera camera{camera_matrix_.at<double>(0,0),camera_matrix_.at<double>(1,1),
+                                       camera_matrix_.at<double>(0,2),camera_matrix_.at<double>(1,2),{}};
+            for (size_t i=0;i<distortion_.total();++i) camera.d[i]=distortion_.at<double>(static_cast<int>(i));
+            cuda_pose_iterations_=integer(config,"cuda_pose_iterations",30,1,100);
+            cuda_pose_ = std::make_unique<CudaPoseBatch>(camera,tag_size_,cuda_pose_iterations_);
+            cuda_multitag_ = std::make_unique<CudaMultiTag>(camera,tag_size_);
+        }
+#endif
         const double half = tag_size_ / 2;
         object_points_ = {{-half, half, 0}, {half, half, 0}, {half, -half, 0}, {-half, -half, 0}};
         const std::string family = config.contains("tag_family") ? py::cast<std::string>(config["tag_family"]) : "tag36h11";
@@ -305,6 +326,21 @@ public:
                     first_known = detection.id;
                 }
             }
+            pose_kernel_ms_ = 0;
+#ifdef CUSTOM_VISION_HAVE_CUDA_POSE
+            if (reason.empty() && cuda_pose_) {
+                for (size_t base=0;base<detections.size();base+=CudaPoseBatch::capacity()) {
+                    const auto count=std::min(CudaPoseBatch::capacity(),detections.size()-base);
+                    for(size_t i=0;i<count;++i)for(int j=0;j<4;++j){
+                        cuda_pose_inputs_[i].uv[2*j]=detections[base+i].corners[j].x;
+                        cuda_pose_inputs_[i].uv[2*j+1]=detections[base+i].corners[j].y;
+                    }
+                    const auto* results=cuda_pose_->solve(cuda_pose_inputs_.data(),count);
+                    pose_kernel_ms_+=cuda_pose_->kernel_ms();
+                    for(size_t i=0;i<count;++i)detections[base+i].pose=from_cuda(results[i]);
+                }
+            } else
+#endif
             for (auto& detection : detections) {
                 if (reason.empty()) detection.pose = estimate(detection.corners);
                 else detection.pose.reason = reason;
@@ -316,6 +352,11 @@ public:
         py::list output;
         for (const auto& detection : detections) {
             py::dict value = pose_dictionary(detection.pose);
+            value["pose_attempted"] = detection.pose.valid || detection.pose.reason == "pnp_failed"
+                || detection.pose.reason == "reprojection_error" || detection.pose.reason == "cuda_pnp_failed";
+            value["pose_device"] = py::cast<bool>(value["pose_attempted"]) ? pose_device_ : "none";
+            if(py::cast<bool>(value["pose_attempted"]))
+                value["pose_source"] = pose_device_ == "cuda" ? "single_tag_cuda_ippe" : "single_tag_pnp";
             value["id"] = detection.id; value["hamming"] = detection.hamming;
             value["decision_margin"] = detection.margin; value["center"] = detection.center;
             std::array<std::array<double, 2>, 4> corners;
@@ -342,17 +383,168 @@ public:
         else {
             py::gil_scoped_release release;
             std::lock_guard<std::mutex> guard(mutex_);
+#ifdef CUSTOM_VISION_HAVE_CUDA_POSE
+            if(cuda_pose_) {
+                vision_pose::Input one{};for(int j=0;j<4;++j){one.uv[2*j]=corners[j].x;one.uv[2*j+1]=corners[j].y;}
+                pose=from_cuda(cuda_pose_->solve(&one,1)[0]);
+            } else
+#endif
             pose = estimate(corners);
         }
-        return pose_dictionary(pose);
+        auto result=pose_dictionary(pose);
+        result["pose_attempted"] = mode_ != "2d" && !camera_matrix_.empty();
+        result["pose_device"]=py::cast<bool>(result["pose_attempted"]) ? pose_device_ : "none";
+        if(py::cast<bool>(result["pose_attempted"]))
+            result["pose_source"] = pose_device_ == "cuda" ? "single_tag_cuda_ippe" : "single_tag_pnp";
+        return result;
+    }
+
+    py::list estimate_poses(py::array_t<double, py::array::c_style | py::array::forcecast> image_points) {
+        // A bounded, pose-only batch API for honest CPU/GPU comparisons. The
+        // runtime uses the same per-frame batch path after native detection.
+        const auto input=image_points.request();
+        if(input.ndim!=3 || input.shape[1]!=4 || input.shape[2]!=2 || input.shape[0]>4096)
+            throw py::value_error("Pose batch must have shape (N,4,2), N <= 4096");
+        const auto count=static_cast<std::size_t>(input.shape[0]);
+        const auto* data=static_cast<const double*>(input.ptr);
+        for(std::size_t j=0;j<count*8;++j)
+            if(!std::isfinite(data[j])) throw py::value_error("Pose corners must be finite");
+        std::vector<Corners> corners(count);
+        std::vector<Pose> poses(count);
+        for(std::size_t i=0;i<count;++i) for(int j=0;j<4;++j)
+            corners[i][j]={data[i*8+j*2],data[i*8+j*2+1]};
+        {
+            py::gil_scoped_release release;
+            std::lock_guard<std::mutex> guard(mutex_);
+            const auto start=Clock::now(); pose_kernel_ms_=0;
+            if(mode_=="2d" || camera_matrix_.empty()) {
+                for(auto& pose:poses) pose.reason=mode_=="2d"?"mode_2d":"no_calibration";
+            } else {
+#ifdef CUSTOM_VISION_HAVE_CUDA_POSE
+                if(cuda_pose_) {
+                    for(std::size_t first=0;first<count;first+=CudaPoseBatch::capacity()) {
+                        const auto n=std::min(CudaPoseBatch::capacity(),count-first);
+                        for(std::size_t i=0;i<n;++i) for(int j=0;j<4;++j) {
+                            cuda_pose_inputs_[i].uv[2*j]=corners[first+i][j].x;
+                            cuda_pose_inputs_[i].uv[2*j+1]=corners[first+i][j].y;
+                        }
+                        const auto* result=cuda_pose_->solve(cuda_pose_inputs_.data(),n);
+                        pose_kernel_ms_+=cuda_pose_->kernel_ms();
+                        for(std::size_t i=0;i<n;++i) poses[first+i]=from_cuda(result[i]);
+                    }
+                } else
+#endif
+                for(std::size_t i=0;i<count;++i) poses[i]=estimate(corners[i]);
+            }
+            const double elapsed=milliseconds(start,Clock::now());
+            timings_={0,0,elapsed,elapsed};
+        }
+        py::list output;
+        for(const auto& pose:poses) {
+            auto value=pose_dictionary(pose);
+            value["pose_attempted"]=mode_!="2d" && !camera_matrix_.empty();
+            value["pose_device"]=py::cast<bool>(value["pose_attempted"]) ? pose_device_ : "none";
+            if(py::cast<bool>(value["pose_attempted"]))
+                value["pose_source"] = pose_device_ == "cuda" ? "single_tag_cuda_ippe" : "single_tag_pnp";
+            output.append(value);
+        }
+        return output;
+    }
+
+    py::dict estimate_multitag(
+        py::array_t<double,py::array::c_style|py::array::forcecast> image_points,
+        py::array_t<double,py::array::c_style|py::array::forcecast> field_points) {
+        const auto images=image_points.request(),world=field_points.request();
+        if(images.ndim!=3 || images.shape[1]!=4 || images.shape[2]!=2
+           || images.shape[0]<2 || images.shape[0]>256)
+            throw py::value_error("MultiTag image corners require shape (N,4,2), 2 <= N <= 256");
+        if(world.ndim!=3 || world.shape[0]!=images.shape[0] || world.shape[1]!=4 || world.shape[2]!=3)
+            throw py::value_error("MultiTag field corners require matching shape (N,4,3)");
+        const auto count=static_cast<std::size_t>(images.shape[0]);
+        const auto* pixels=static_cast<const double*>(images.ptr);
+        const auto* points=static_cast<const double*>(world.ptr);
+        for(std::size_t i=0;i<count*8;++i)
+            if(!std::isfinite(pixels[i]))throw py::value_error("MultiTag image corners must be finite");
+        for(std::size_t i=0;i<count*12;++i)
+            if(!std::isfinite(points[i]))throw py::value_error("MultiTag field corners must be finite");
+#ifdef CUSTOM_VISION_HAVE_CUDA_POSE
+        if(!cuda_multitag_)throw py::value_error("Joint CUDA MultiTag requires pose_device=cuda");
+        vision_multitag::Result solved;
+        double elapsed,kernel;
+        {
+            py::gil_scoped_release release;
+            std::lock_guard<std::mutex> guard(mutex_);
+            const auto start=Clock::now();
+            for(std::size_t i=0;i<count;++i)for(int j=0;j<8;++j)
+                cuda_pose_inputs_[i].uv[j]=pixels[i*8+j];
+            // Copy out while holding the mutex: the solver reuses its pinned
+            // output storage, including for concurrent calls on this instance.
+            solved=*cuda_multitag_->solve(cuda_pose_inputs_.data(),points,count,max_error_,cuda_pose_iterations_);
+            kernel=cuda_multitag_->kernel_ms();
+            elapsed=milliseconds(start,Clock::now());
+        }
+        Pose pose;
+        pose.reason=solved.reason==vision_multitag::no_consensus ? "inconsistent_tag_observations"
+                   : solved.reason==vision_multitag::reprojection_error ? "reprojection_error"
+                   : "cuda_multitag_failed";
+        const auto finite_candidate=[](const vision_pose::Candidate& candidate){
+            for(double v:candidate.R)if(!std::isfinite(v))return false;
+            for(double v:candidate.t)if(!std::isfinite(v))return false;
+            // The field origin may be behind the camera: global t.z need not
+            // be positive. The GPU checks depths of all accepted tag corners.
+            return std::isfinite(candidate.error) && candidate.error>=0;
+        };
+        const auto convert=[](const vision_pose::Candidate& source){
+            Candidate candidate;cv::Matx33d rotation;
+            for(int i=0;i<9;++i)rotation.val[i]=source.R[i];
+            cv::Rodrigues(rotation,candidate.rvec);
+            for(int i=0;i<3;++i)candidate.tvec[i]=source.t[i];
+            candidate.error=source.error;return candidate;
+        };
+        if(solved.valid && solved.inlier_count>=2 && finite_candidate(solved.best)
+           && std::isfinite(solved.ambiguity) && solved.ambiguity>=0 && solved.ambiguity<=1) {
+            pose.best=convert(solved.best);pose.ambiguity=solved.ambiguity;
+            pose.has_alternate=solved.has_alternate && finite_candidate(solved.alternate);
+            if(pose.has_alternate)pose.alternate=convert(solved.alternate);
+            if(pose.best.error<=max_error_){pose.valid=true;pose.reason.clear();}
+            else pose.reason="reprojection_error";
+        }
+        auto output=pose_dictionary(pose);
+        output["pose_device"]="cuda";output["pose_attempted"]=true;
+        output["pose_source"]="field_layout_cuda_multitag";
+        output["coplanar"]=static_cast<bool>(solved.coplanar);
+        output["iterations"]=solved.iterations;
+        std::vector<int> accepted,rejected;
+        for(std::size_t i=0;i<count;++i)(solved.accepted[i]?accepted:rejected).push_back(static_cast<int>(i));
+        output["inlier_indices"]=accepted;output["rejected_indices"]=rejected;
+        py::list tag_errors;
+        bool quality_consistent=accepted.size()>=2 && static_cast<int>(accepted.size())==solved.inlier_count;
+        for(std::size_t i=0;i<count;++i) {
+            const double error=solved.tag_errors[i];
+            if(std::isfinite(error) && error>=0)tag_errors.append(py::float_(error));
+            else tag_errors.append(py::none());
+            if(solved.accepted[i] && (!std::isfinite(error) || error<0 || error>max_error_))quality_consistent=false;
+        }
+        if(pose.valid && !quality_consistent) {
+            output["pose_valid"]=false;output["pose_invalid_reason"]="reprojection_error";
+        }
+        output["per_tag_reprojection_error_px"]=tag_errors;
+        py::dict timing;timing["pose_ms"]=elapsed;timing["pose_kernel_ms"]=kernel;
+        output["timings"]=timing;
+        return output;
+#else
+        throw py::value_error("CUDA MultiTag not compiled; build with -DCUSTOM_VISION_CUDA_POSE=ON");
+#endif
     }
 
     py::dict last_timings() {
         Timings timings;
-        { std::lock_guard<std::mutex> guard(mutex_); timings = timings_; }
+        double kernel;
+        { std::lock_guard<std::mutex> guard(mutex_); timings = timings_; kernel=pose_kernel_ms_; }
         py::dict result;
         result["preprocess_ms"] = timings.preprocess; result["detect_ms"] = timings.detect;
         result["pose_ms"] = timings.pose; result["total_ms"] = timings.total;
+        result["pose_kernel_ms"] = kernel;
         return result;
     }
 
@@ -493,6 +685,33 @@ private:
         return std::sqrt(sum / 4);
     }
 
+#ifdef CUSTOM_VISION_HAVE_CUDA_POSE
+    Pose from_cuda(const vision_pose::Result& input) const {
+        Pose out;out.reason="cuda_pnp_failed";
+        if(!input.valid)return out;
+        // Projection, distortion, all-corner positive depth and error are
+        // evaluated on the GPU. Cross-check against OpenCV in the numerical
+        // tests, rather than duplicating every projection on the CPU per frame.
+        const auto finite_candidate=[](const vision_pose::Candidate& c){
+            for(double v:c.R)if(!std::isfinite(v))return false;
+            for(double v:c.t)if(!std::isfinite(v))return false;
+            return std::isfinite(c.error) && c.error>=0 && c.t[2]>0;
+        };
+        if(!finite_candidate(input.best) || !std::isfinite(input.ambiguity)
+           || input.ambiguity<0 || input.ambiguity>1)return out;
+        auto convert=[](const vision_pose::Candidate& c){
+            Candidate value;cv::Matx33d R;
+            for(int i=0;i<9;++i)R.val[i]=c.R[i];
+            cv::Rodrigues(R,value.rvec);for(int i=0;i<3;++i)value.tvec[i]=c.t[i];value.error=c.error;return value;
+        };
+        out.best=convert(input.best);
+        out.ambiguity=input.ambiguity;
+        out.has_alternate=input.has_alternate && finite_candidate(input.alternate);
+        if(out.has_alternate)out.alternate=convert(input.alternate);
+        if(out.best.error>max_error_){out.reason="reprojection_error";return out;}
+        out.valid=true;out.reason.clear();return out;
+    }
+#endif
     Pose estimate(const Corners& corners) const {
         Pose result;
         try {
@@ -555,7 +774,14 @@ private:
     bool cuda_detect_ = false;
     bool skip_single_when_multi_ = false;
     std::unordered_set<int> known_ids_;
-    std::string mode_;
+    std::string mode_,pose_device_;
+    double pose_kernel_ms_=0;
+#ifdef CUSTOM_VISION_HAVE_CUDA_POSE
+    std::unique_ptr<CudaPoseBatch> cuda_pose_;
+    std::unique_ptr<CudaMultiTag> cuda_multitag_;
+    int cuda_pose_iterations_=30;
+    std::array<vision_pose::Input,256> cuda_pose_inputs_{};
+#endif
     cv::Mat camera_matrix_, distortion_, gray_buffer_;
     std::vector<cv::Point3d> object_points_;
     Timings timings_;
@@ -578,7 +804,20 @@ private:
 static py::dict capabilities() {
     py::dict result;
     result["apriltag_device"] = "cpu";
-    result["pose_device"] = "cpu";
+    result["pose_device"] = "cpu";  // Default, not an individual detector's selection.
+#ifdef CUSTOM_VISION_HAVE_CUDA_POSE
+    result["cuda_pose_compiled"]=true;
+    result["cuda_multitag_compiled"]=true;
+    result["cuda_multitag_max_tags"]=CudaMultiTag::capacity();
+    result["cuda_pose_devices"]=CudaPoseBatch::device_count();
+    result["pose_devices"]=std::vector<std::string>{"cpu","cuda"};
+#else
+    result["cuda_pose_compiled"]=false;
+    result["cuda_multitag_compiled"]=false;
+    result["cuda_multitag_max_tags"]=0;
+    result["cuda_pose_devices"]=0;
+    result["pose_devices"]=std::vector<std::string>{"cpu"};
+#endif
     result["apriltag_version"] = CUSTOM_VISION_APRILTAG_VERSION;
     result["opencv_version"] = CV_VERSION;
     result["opencv_threads"] = cv::getNumThreads();
@@ -622,6 +861,8 @@ PYBIND11_MODULE(_native, module) {
         .def(py::init<const py::dict&, py::object>(), py::arg("config"), py::arg("calibration") = py::none())
         .def("process", &Detector::process, py::arg("frame").noconvert())
         .def("estimate_pose", &Detector::estimate_pose)
+        .def("estimate_poses", &Detector::estimate_poses)
+        .def("estimate_multitag", &Detector::estimate_multitag)
         .def_property_readonly("last_timings", &Detector::last_timings)
         .def_property_readonly("last_profile", &Detector::last_profile);
 }

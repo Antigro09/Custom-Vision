@@ -42,13 +42,17 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port',type=int,default=5802)
     parser.add_argument('--backend',choices=['native','pupil'],default='native')
+    parser.add_argument('--detector-device',choices=['cpu','cuda'],default='cpu')
+    parser.add_argument('--pose-device',choices=['cpu','cuda'],default='cpu')
+    parser.add_argument('--poi',action='store_true',help='Show preview-only tag-relative offset geometry')
     parser.add_argument('--max-frames',type=int,default=0)
     args=parser.parse_args()
     root=Path(__file__).resolve().parents[1]
     directory=root/'data'/'apriltag-demo'
     directory.mkdir(parents=True,exist_ok=True)
     image,calibration,layout=fixture()
-    (directory/'calibration.json').write_text(json.dumps(calibration,indent=2))
+    # This is a mathematically defined scene, never a measured physical camera.
+    (directory/'calibration.json').write_text(json.dumps(dict(calibration,benchmark_only=True),indent=2))
     (directory/'field.json').write_text(json.dumps(layout,indent=2))
     config=yaml.safe_load((root/'config'/'vision.yaml').read_text())
     config['networktables']['enabled']=False
@@ -61,8 +65,14 @@ def main():
     cfg['input_kind']='synthetic'
     cfg['calibration']='calibration.json'
     cfg['settings']['backend']=args.backend
+    cfg['settings']['detector_device']=args.detector_device
+    cfg['settings']['pose_device']=args.pose_device
     cfg['settings']['max_ambiguity']=.3
     cfg['robot_to_camera']={'translation_m':[.25,.1,.45],'rotation_rpy_deg':[0,0,0]}
+    if args.poi:
+        cfg['poi']={'enabled':True,'calibration_verified':False,'max_ambiguity':.3,
+                    'targets':[{'name':'demo_aim','tag_id':7,'offset_m':[0.,0.,.1]}]}
+        cfg['preview']['box_depth_ratio']=1.
     path=directory/'vision.yaml'
     path.write_text(yaml.safe_dump(config,sort_keys=False))
     from custom_vision import app

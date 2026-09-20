@@ -36,13 +36,37 @@ Every packet contains `schema_version:2`, unique `boot_id`, `pipeline`, `type`,
 `time_sync_valid`, `timestamp_source`, `capture_latency_offset_ms`, `detections`,
 and `error`. Normal frames also carry `frame_size`, `processing_ms`, `detector_ms`,
 `localization_ms`, `queue_ms`, `native_timings`, `fps` and `dropped_frames`.
+`fps` measures smoothed processing throughput, separately from preview rate and
+latency. `pose_device` identifies the single-tag stage actually run (`cpu`, `cuda`,
+`mixed`, or `none`); `localization.pose_device` identifies the actual field solver
+(`cpu` or `cuda`) when attempted. These are execution diagnostics, not a claim
+that the entire pipeline runs on that device. The configured pose device controls
+both single-tag and joint field PnP, including deferred single-tag calls.
+Native stage timings are captured before localization's optional pose-only calls.
+`single_tag_pose_ms` includes those later calls;
+`localization.single_tag_fallback` reports their count, time and actual devices.
+
+Tag-relative POI aiming adds coherent `poi` data and typed convenience topics:
+`fps`, `poi_valid`, `poi_name`, `poi_tag_id`, `poi_tx_deg`, `poi_ty_deg`,
+`poi_camera_xyz`, `poi_robot_xyz` and `poi_robot_yaw_deg`. These offsets use a
+currently observed single-tag pose and do not require field localization or
+odometry. Invalid observations clear the topics. See the
+[POI contract](POI_AND_CUDA_POSE.md#poi-aim-at-an-offset-from-a-currently-visible-tag)
+for units, axes, calibration gates and robot-consumer requirements. A valid POI
+does not imply a valid robot field pose or an autonomous motion command.
 Diagnostic fields can be absent on failure packets; consumers must tolerate that.
 
 AprilTag detections include ID, corrected bits, decision margin, decoded corners,
 center, area, yaw and pitch, pose validity and rejection reasons. Metric target
 transforms use `camera_to_target` and, with measured mounting, `robot_to_target`.
 `localization` contains validity, method, `field_to_camera`, `field_to_robot`,
-used/rejected IDs, ambiguity, reprojection error and rejection reason. Pose objects
+used/rejected IDs, ambiguity, reprojection error and rejection reason. CUDA joint
+results also contain `tag_reprojection_errors_px`, keyed by accepted tag ID as a
+JSON string. These RMS pixel errors are calculated on the GPU and reused in the
+field-derived target detections; they are not robot-pose uncertainty estimates.
+`localization.gpu_timings` reports nested `pose_kernel_ms` (CUDA events), `pose_ms`
+(native solver work) and `call_ms` (outer native call). Do not add these overlapping
+measurements or confuse them with total frame latency. Pose objects
 use meters, quaternion **WXYZ**, and a `frame: wpilib_nwu` label. Raw OpenCV
 `tvec_m`/`rvec_rad` are retained as diagnostics and use different axes.
 

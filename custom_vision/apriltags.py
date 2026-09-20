@@ -48,6 +48,8 @@ class AprilTagPipeline:
     def __init__(self, config: dict, calibration: dict | None = None):
         if not isinstance(config, dict):
             raise ValueError("apriltags configuration must be an object")
+        if config.get('pose_device', 'cpu') != 'cpu':
+            raise ValueError('CUDA pose requires the native backend')
         self.mode = config.get("mode", "3d")
         if self.mode not in ("2d", "3d"):
             raise ValueError("AprilTag mode must be 2d or 3d")
@@ -85,8 +87,12 @@ class AprilTagPipeline:
 
     def _estimate_pose(self, corners: np.ndarray) -> dict:
         from .localization import estimate_tag_pose
-        return estimate_tag_pose(corners, self.tag_size_m, self._camera_matrix,
-                                 self._dist_coeffs, self.max_reprojection_error_px)
+        if self.mode == '2d' or self.calibration is None:
+            return {'pose_valid': False, 'pose_attempted': False, 'pose_device': 'none',
+                    'pose_invalid_reason': 'mode_2d' if self.mode == '2d' else 'no_calibration'}
+        return dict(estimate_tag_pose(corners, self.tag_size_m, self._camera_matrix,
+                                     self._dist_coeffs, self.max_reprojection_error_px),
+                    pose_attempted=True, pose_device='cpu', pose_source='single_tag_pnp')
 
     def process(self, frame_bgr: np.ndarray) -> list[dict]:
         if (not isinstance(frame_bgr, np.ndarray) or frame_bgr.dtype != np.uint8
@@ -119,6 +125,7 @@ class AprilTagPipeline:
                          "center": center.tolist(), "corners": corners.tolist(), "pose_valid": False}
             if pose_reason:
                 detection["pose_invalid_reason"] = pose_reason
+                detection.update(pose_attempted=False, pose_device='none')
             else:
                 detection.update(self._estimate_pose(corners))
             results.append(detection)
