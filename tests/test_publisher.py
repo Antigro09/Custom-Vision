@@ -21,6 +21,8 @@ class Instance:
         self.offset = offset
         self.topics = {}
         self.flushes = 0
+    def isConnected(self):
+        return True
     def getServerTimeOffset(self):
         return self.offset
     def getTable(self, path):
@@ -93,7 +95,7 @@ def test_object_selection_topics_clear_on_lost_target_or_disconnect():
     data=packet()
     target={'valid':True,'observed':True,'track_id':17,'translation_m':[2,.2,.05],
             'approach':{'translation_m':[1.4,.2,0]}}
-    data['objects']={'valid':True,'selected_target':target,'targets':[target]}
+    data['objects']={'valid':True,'selected_target':target,'selected_track_id':17,'targets':[target]}
     pub.publish(data)
     topics=pub.instance.topics
     assert topics['target_valid'].value is True
@@ -174,3 +176,107 @@ def test_poi_missing_mount_keeps_camera_aim_without_inventing_robot_coordinates(
     assert topics['poi_valid'].value is True
     assert topics['poi_camera_xyz'].value==[.1,-.1,2.]
     assert topics['poi_robot_xyz'].value==[] and topics['poi_robot_yaw_deg'].value==[]
+
+
+def test_publication_sequence_advances_for_same_frame_invalidation_and_reboot():
+    pub=Publisher({'enabled':False})
+    pub.instance=Instance(None)
+    data=packet()
+    pub.publish(data)
+    assert data['packet_seq']==0
+    assert pub.instance.topics['packet_seq'].value==0
+    data.update(connected=False,detections=[],error='watchdog')
+    for sequence in (1,2):
+        pub.publish(data)
+        decoded=json.loads(pub.instance.topics['result'].value)
+        assert decoded['packet_seq']==sequence and decoded['frame_id']==42
+        assert decoded['boot_id']=='boot-a' and decoded['capture_server_us'] is None
+    data.update(pipeline='rear')
+    pub.publish(data)
+    assert data['packet_seq']==0
+    data.update(pipeline='front',boot_id='boot-b')
+    pub.publish(data)
+    assert data['packet_seq']==0
+
+
+def test_publication_lock_orders_concurrent_workers_and_invalidations():
+    import threading
+    pub=Publisher({'enabled':False})
+    pub.instance=Instance(None)
+    encoded=[]
+    result=pub.instance.topics.setdefault('result',Topic())
+    result.set=lambda value: encoded.append(json.loads(value))
+    gate=threading.Barrier(5)
+    def worker(index):
+        gate.wait()
+        for _ in range(8):
+            data=packet()
+            data.update(connected=index!=0,detections=[] if index==0 else [{'id':7}])
+            pub.publish(data)
+    threads=[threading.Thread(target=worker,args=(index,)) for index in range(4)]
+    for thread in threads:thread.start()
+    gate.wait()
+    for thread in threads:thread.join(timeout=3)
+    assert all(not thread.is_alive() for thread in threads)
+    assert [value['packet_seq'] for value in encoded]==list(range(32))
+    assert sum(not value['connected'] for value in encoded)==8
+
+
+def test_failed_serialization_does_not_consume_sequence_and_overflow_fails_closed():
+    from custom_vision.publisher import MAX_PACKET_SEQ
+    pub=Publisher({'enabled':False})
+    pub.instance=Instance(None)
+    data=packet()
+    data['bad']=float('nan')
+    with pytest.raises(ValueError):pub.publish(data)
+    assert pub.packet_sequences=={}
+    data.pop('bad')
+    pub.packet_sequences[('boot-a','front')]=MAX_PACKET_SEQ
+    pub.publish(data)
+    assert data['packet_seq']==MAX_PACKET_SEQ
+    previous=pub.instance.topics['result'].value
+    with pytest.raises(OverflowError,match='new producer boot'):pub.publish(data)
+    assert pub.instance.topics['result'].value==previous
+
+
+def test_canonical_object_selection_does_not_follow_stale_dashboard_alias():
+    pub=Publisher({'enabled':False})
+    pub.instance=Instance(None)
+    data=packet()
+    target={'valid':True,'observed':True,'track_id':7,'translation_m':[2,.3,.1],
+            'approach':{'translation_m':[1,.3,0]}}
+    data['objects']={'valid':True,'targets':[target],'selected_track_id':7,
+                     'selected_target':dict(target,translation_m=[99,99,99])}
+    pub.publish(data)
+    assert pub.instance.topics['selected_target_robot'].value==[2,.3,.1]
+    assert data['objects']['selected_target']['translation_m']==[99,99,99]
+
+
+@pytest.mark.parametrize('problem',['selection','reference','duplicates'])
+def test_wire_compaction_rejects_incoherent_references(problem):
+    from custom_vision.publisher import wire_packet
+    target={'valid':True,'track_id':7}
+    data={'detections':[{'robot_relative':target}],
+          'objects':{'targets':[target],'selected_track_id':7}}
+    if problem=='selection':data['objects']['selected_track_id']=8
+    elif problem=='reference':data['detections']=[{'robot_relative':{'valid':True,'track_id':8}}]
+    else:data['objects']['targets'].append(dict(target))
+    with pytest.raises(ValueError):wire_packet(data)
+
+
+def test_verified_zero_correction_is_not_inferred_from_numeric_offset():
+    pub=Publisher({'enabled':False})
+    pub.instance=Instance(None)
+    data=packet()
+    data.update(capture_latency_offset_ms=0,timing={
+        'clock_domain':'nt_server','timestamp_unit':'us','capture_event':'host_frame_read_complete',
+        'capture_correction_verified':True,'capture_correction_uncertainty_ms':.25})
+    pub.publish(data)
+    wire=json.loads(pub.instance.topics['result'].value)
+    assert wire['timing']['capture_correction_verified'] is True
+    assert wire['timing']['capture_correction_uncertainty_ms']==.25
+    assert wire['time_sync_valid'] is False
+    data.update(capture_latency_offset_ms=4)
+    data['timing'].update(capture_correction_verified=False,capture_correction_uncertainty_ms=None)
+    pub.publish(data)
+    assert json.loads(pub.instance.topics['result'].value)['timing']['capture_correction_verified'] is False

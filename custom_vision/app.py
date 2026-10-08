@@ -14,6 +14,7 @@ from .config import load_config
 from .camera import LatestFrameCapture
 from .dashboard import Dashboard
 from .publisher import Publisher
+from .revisions import geometry_revisions
 
 LOG = logging.getLogger('custom_vision')
 
@@ -124,6 +125,7 @@ class Runtime:
         self.threads=[]
         self.lock=threading.RLock()
         self.states={}
+        self.revisions={}
         self.groups={}
         for cfg in config['pipelines']:
             if not cfg.get('enabled',True): continue
@@ -134,6 +136,7 @@ class Runtime:
                 raise ValueError('Pipelines sharing a camera must use identical camera settings')
             self.groups.setdefault(source,[]).append((cfg,detector))
             self.states[cfg['name']]={'last_frame':time.monotonic(),'frame_id':0,'failed':False,'fps':0.,'last_publish':0.}
+            self.revisions[cfg['name']]=geometry_revisions(cfg,config)
         self.publisher=Publisher(config['networktables'],stdout=stdout)
         self.controller=None
         if config_path:
@@ -155,6 +158,10 @@ class Runtime:
                 return
             self.restart_requested=True
             self.stop.set()
+            for cfg in self.config['pipelines']:
+                state=self.states.get(cfg['name'])
+                if state is not None:
+                    self.emit(cfg,state['frame_id'],state['last_frame'],[],error='Runtime reload requested')
 
     def release_camera(self,cap):
         # OpenCV and existing test captures return None on success; the latest
@@ -169,7 +176,7 @@ class Runtime:
             return False
         return True
 
-    def emit(self,cfg,frame_id,captured,detections,*,frame=None,error=None,extras=None):
+    def emit(self,cfg,frame_id,captured,detections,*,frame=None,error=None,extras=None,processed_at=None):
         with self.lock:
             if self.closed or (self.stop.is_set() and error is None): return
             # A worker can wait here behind another camera or the watchdog.
@@ -177,6 +184,13 @@ class Runtime:
             # detector-end time must never revive an already invalidated target.
             now=time.monotonic()
             max_age=self.config.get('max_frame_age_ms',500)
+            captured_us=int(captured*1e6)
+            state=self.states[cfg['name']]
+            if error is None and (captured_us<=state.get('invalidated_capture_us',-1)
+                                  or frame_id<state['frame_id']):
+                # A retained invalidation wins over the original in-flight
+                # observation, even if a later clock reading looks fresh.
+                return
             if error is None and (now-captured)*1000>max_age:
                 error=f'Frame exceeded {max_age:g} ms age limit'
                 detections=[]
@@ -189,16 +203,34 @@ class Runtime:
                      # Reports the single-tag solve actually run this frame.
                      # Joint field solving has its own localization.pose_device.
                      'pose_device':'none',
-                     'input_kind':cfg.get('input_kind','camera'),'connected':error is None,'frame_id':frame_id,'capture_monotonic_us':int(captured*1e6),
+                     'input_kind':cfg.get('input_kind','camera'),'connected':error is None,'frame_id':frame_id,'capture_monotonic_us':captured_us,
                      'publish_unix_us':time.time_ns()//1000,'latency_ms':max(0.,(now-captured)*1000),
                      'timestamp_source':'host_frame_read_complete',
                      'capture_latency_offset_ms':cfg.get('camera',{}).get('capture_latency_offset_ms',0),
+                     'timing':{'clock_domain':'nt_server','timestamp_unit':'us','capture_event':'host_frame_read_complete',
+                               'capture_correction_verified':cfg.get('camera',{}).get('capture_correction_verified',False),
+                               'capture_correction_uncertainty_ms':cfg.get('camera',{}).get('capture_correction_uncertainty_ms')},
                      'detections':detections,'error':error,'preview_settings':cfg.get('preview',{})}
             if extras: payload.update(extras)
+            revisions=getattr(self,'revisions',{}).get(cfg['name'])
+            payload.update(revisions if revisions is not None else geometry_revisions(cfg,self.config))
             if error is not None:
+                payload['connected']=False
+                payload['error']=error
+                payload['detections']=[]
                 payload['fps']=0.
                 payload['pose_device']='none'
+                payload['localization']={'valid':False,'field_to_camera':None,'field_to_robot':None,'used_tag_ids':[],
+                                         'invalid_reason':error}
+                payload['objects']={'valid':False,'targets':[],'selected_target':None,'selected_track_id':None,
+                                    'motion_compensated':False,'invalid_reason':error}
                 payload['poi']={'valid':False,'selected_name':None,'targets':[],'invalid_reason':error}
+                state['invalidated_capture_us']=max(captured_us,state.get('invalidated_capture_us',-1))
+                state['failed']=True
+                frame=None
+            else:
+                state.update(last_frame=captured,frame_id=frame_id,failed=False,last_publish=now if processed_at is None else processed_at,
+                             fps=payload.get('fps',0.))
             self.publisher.publish(payload)
             if self.dashboard: self.dashboard.update(payload,frame)
 
@@ -269,7 +301,6 @@ class Runtime:
                                 fps=1/interval if state.get('last_publish',0) and interval>0 else 0
                                 previous=state.get('fps',0)
                                 fps=1/(.2/fps+.8/previous) if previous and fps else fps
-                                state.update(last_frame=captured,frame_id=frame_id,failed=False,last_publish=finished,fps=fps)
                             extras.update(frame_size=[frame.shape[1],frame.shape[0]],processing_ms=(finished-started)*1000,detector_ms=(detector_end-started)*1000,
                                           localization_ms=(finished-detector_end)*1000,queue_ms=max(0.,(started-captured)*1000),
                                           fps=fps,dropped_frames=getattr(cap,'dropped_frames',0),
@@ -278,12 +309,12 @@ class Runtime:
                                 if hasattr(detector,'geometry'): detector.geometry.reset()
                                 self.emit(cfg,frame_id,captured,[],error=f'Frame exceeded {max_age:g} ms age limit')
                             else:
-                                self.emit(cfg,frame_id,captured,detections,frame=frame,extras=extras)
+                                self.emit(cfg,frame_id,captured,detections,frame=frame,extras=extras,processed_at=finished)
                         except Exception as exc:
                             self.had_error=True
                             if hasattr(detector,'geometry'): detector.geometry.reset()
                             LOG.exception('Pipeline %s failed',cfg['name'])
-                            with self.lock: self.states[cfg['name']].update(last_frame=started,frame_id=frame_id,failed=True)
+                            with self.lock: self.states[cfg['name']].update(last_frame=captured,frame_id=frame_id,failed=True)
                             self.emit(cfg,frame_id,captured,[],error=str(exc))
                     frame_id+=1
                     count+=1
@@ -315,12 +346,12 @@ class Runtime:
                         if cfg['name'] not in self.states: continue
                         state=self.states[cfg['name']]
                         if (time.monotonic()-state['last_frame'])*1000>max_age:
-                            self.emit(cfg,state['frame_id'],time.monotonic(),[],error=f'No fresh frame within {max_age:g} ms')
+                            self.emit(cfg,state['frame_id'],state['last_frame'],[],error=f'No fresh frame within {max_age:g} ms')
         finally:
             self.stop.set()
             for thread in self.threads: thread.join(timeout=2)
             for cfg in self.config['pipelines']:
-                if cfg['name'] in self.states: self.emit(cfg,self.states[cfg['name']]['frame_id'],time.monotonic(),[],error='Runtime stopped')
+                if cfg['name'] in self.states: self.emit(cfg,self.states[cfg['name']]['frame_id'],self.states[cfg['name']]['last_frame'],[],error='Runtime stopped')
             with self.lock:
                 self.closed=True
                 if self.dashboard: self.dashboard.close()

@@ -11,14 +11,15 @@ intentionally deferred until camera and robot testing.
 | `result` | string | Complete coherent JSON snapshot; preferred robot interface |
 | `connected` | boolean | Fresh camera frame, not NT connectivity |
 | `has_target`, `count` | boolean, integer | Current detections |
-| `frame_id` | integer | Sequence, resets at runtime restart |
+| `frame_id` | integer | Capture/processing identity, resets at runtime restart |
+| `packet_seq` | integer | Publication order per pipeline and boot, including same-frame invalidation |
 | `latency_ms` | double | Host read completion through publication preparation |
 | `tag_ids` | integer[] | IDs in this result |
 | `pose_valid` | boolean | Valid **field robot** pose, including measured mounting |
 | `field_to_robot` | double[] | `[x,y,z,qw,qx,qy,qz]`, meters, or empty when invalid |
 | `used_tag_ids` | integer[] | IDs used for the valid field robot pose |
 | `capture_server_us` | integer | Estimated frame time in NT server clock, 0 if unavailable |
-| `time_sync_valid` | boolean | NT clock offset was available for this frame |
+| `time_sync_valid` | boolean | Connected, supported API and usable NT clock conversion for this frame |
 
 JSON floating-point values are rounded to six decimal places to reduce wire size;
 integer timestamps retain full precision. Host-side geometry stays full precision.
@@ -55,6 +56,10 @@ odometry. Invalid observations clear the topics. See the
 for units, axes, calibration gates and robot-consumer requirements. A valid POI
 does not imply a valid robot field pose or an autonomous motion command.
 Diagnostic fields can be absent on failure packets; consumers must tolerate that.
+The additive `custom-vision-schema2-2026.1` profile supplies `protocol_profile`,
+`packet_seq`, three nullable public geometry revisions and `timing`. See the
+[normative schemas, units and producer fixtures](../protocol/README.md). Existing
+schema-2 meanings and typed topic types are retained.
 
 AprilTag detections include ID, corrected bits, decision margin, decoded corners,
 center, area, yaw and pitch, pose validity and rejection reasons. Metric target
@@ -85,13 +90,22 @@ decode. It is not a hardware exposure timestamp. `capture_monotonic_us` belongs 
 the Jetson monotonic clock; `publish_unix_us` is logging metadata. Neither is a
 roboRIO FPGA timestamp.
 
-When NTCore supplies a server clock offset, the publisher translates host frame age
-into the NT server clock and subtracts `camera.capture_latency_offset_ms`. This
-optional correction must be measured for the actual camera mode/exposure. Leave it
-zero until measured. On a roboRIO-hosted NT server the server clock is suitable for
-FPGA-time integration after verification; a desktop NT server is not the roboRIO
-clock. Reject latency compensation when `time_sync_valid` is false. The timestamp
-still has unmeasured capture delay until the physical correction is established.
+When a connected, supported NTCore instance supplies a usable server clock offset,
+the publisher translates host frame age into the NT server clock and subtracts
+`camera.capture_latency_offset_ms`. The configured correction is independent of
+`timing.capture_correction_verified`: a measured correction may be zero, and a
+nonzero configured correction may be unverified. Unknown uncertainty is `null`,
+not zero. No configuration value establishes an exposure measurement. On a
+roboRIO-hosted NT server the server clock is suitable for FPGA-time integration
+after verification; a desktop server is not the roboRIO clock. Reject latency
+compensation when `time_sync_valid` is false. Capture delay remains unmeasured
+until the physical correction is established.
+
+The Python clock adapter supports the pinned 2023.4/2024 microsecond API family.
+Missing private bindings, unsupported versions, invalid clocks/offsets, future
+capture times and disconnects suppress synchronized time. Alpha-7 Java NT sample
+metadata uses nanoseconds; JSON `_us` fields remain microseconds. See the
+[version-pinned loopback harness](NT4_INTEROP.md).
 
 The default watchdog clears results after 100 ms without fresh processed data.
 Over-age computations cannot revive expired targets. Reconfiguration, disconnect
@@ -102,12 +116,22 @@ against measured frame intervals and network jitter.
 
 A future consumer should:
 
-1. Read queued new `result` samples; validate schema and pipeline identity.
-2. Track `(boot_id, frame_id)`; discard duplicates/out-of-order samples and reset
-   state when boot ID changes.
-3. Clear target and pose state on every invalid or empty result; never retain a
-   previous pose because a new frame lacks one.
-4. Reject stale receipt times and disconnected NT sessions independently.
+1. Read queued new `result` samples; validate schema, configured source root and
+   pipeline identity, current NT session and acceptable boot transition. Keep
+   liveness/receipt state separately for each source and pipeline.
+2. Validate publication eligibility using `(source, pipeline, boot_id, packet_seq)`.
+   Reject older or duplicate publications before they alter state. Reset sequence
+   at an accepted new boot; retained values do not establish a live session. Never
+   switch back to a retired boot because of a delayed packet.
+3. Apply accepted invalidation or family replacement **before** deduplicating
+   reusable measurements by `(source, pipeline, boot_id, frame_id)`. A watchdog can
+   invalidate the same frame with a larger `packet_seq`; frame deduplication must
+   never discard this invalidation. Repeated invalidations advance the sequence.
+   Missing/invalid families clear their actionable state. Valid POI/object geometry
+   may coexist with invalid localization.
+4. Independently expire receipt times and disconnected NT sessions. Each source
+   has its own liveness: a second live camera cannot keep an expired first camera
+   valid. A duplicate measurement cannot extend its measurement age.
 5. For odometry, require valid field robot pose, synchronized corrected timestamp,
    reasonable field bounds and measured quality thresholds. Select pose-estimator
    uncertainty from distance, geometry and residuals after field testing.
@@ -149,3 +173,10 @@ transform measurements using robot pose at capture time if building a field map.
 Unknown calibration/mount/target height means no metric target. Camera failure,
 late frames, empty detections and shutdown clear selection topics. Receiver-side
 freshness checks remain required even when retained NT values look valid.
+
+IDs are scoped to configured source, pipeline and boot. Every compact
+`robot_relative.track_id` and `selected_track_id` resolves in `objects.targets`.
+The producer refuses incoherent compact references. A bounding box and configured
+target-height plane produce approximate range with anchor/covariance provenance;
+they do not establish exact 3D shape or field identity. `motion_compensated` and
+`approach.path_validated` remain false.
