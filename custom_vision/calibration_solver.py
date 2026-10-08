@@ -9,6 +9,7 @@ from datetime import datetime
 import hashlib
 import json
 import math
+import operator
 from pathlib import Path
 import shutil
 import subprocess
@@ -231,17 +232,35 @@ def export_opencv(mrcal, model, data):
 
 def board_poses(model, indices, views):
     inputs = model.optimization_inputs()
-    frames = inputs['frames_rt_toref']
-    mapping = inputs['indices_frame_camintrinsics_camextrinsics']
+    # mrcal 2.5 renamed this field and deliberately poisons the old key with
+    # an error string. Both numeric fields represent board -> reference camera.
+    key = 'rt_ref_frame' if 'rt_ref_frame' in inputs else 'frames_rt_toref'
+    try:
+        frames = np.asarray(inputs[key], dtype=float)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError('Missing or nonnumeric board poses in optimization inputs') from exc
+    if frames.ndim != 2 or frames.shape[1] != 6 or not len(frames) or not np.isfinite(frames).all():
+        raise ValueError('Board poses must be a finite nonempty Nx6 rotation/translation array')
+    mapping = np.asarray(inputs['indices_frame_camintrinsics_camextrinsics'])
+    if mapping.ndim != 2 or mapping.shape != (len(indices), 3) or mapping.dtype.kind not in 'iu':
+        raise ValueError('Board observation mapping must be an integer Nx3 array matching selected views')
     records = []
     for observation_index, (frame_index, camera_index, extrinsics_index) in enumerate(mapping):
         if camera_index != 0 or extrinsics_index != -1:
             raise ValueError('Expected monocular reference camera; cannot label multi-camera poses as camera poses')
+        if frame_index < 0 or frame_index >= len(frames):
+            raise ValueError('Board observation frame index is out of range')
+        try:
+            selected_index = operator.index(indices[observation_index])
+        except TypeError as exc:
+            raise ValueError('Selected view index must be an integer') from exc
+        if isinstance(indices[observation_index], (bool, np.bool_)) or not 0 <= selected_index < len(views):
+            raise ValueError('Selected view index is out of range')
         rt = frames[frame_index]
         transform = np.eye(4)
         transform[:3, :3] = cv2.Rodrigues(rt[:3])[0]
         transform[:3, 3] = rt[3:]
-        records.append({'image': views[indices[observation_index]]['image'],
+        records.append({'image': views[selected_index]['image'],
                          'camera_cv_T_board': transform.tolist()})
     return {'convention': 'p_camera_cv = R @ p_board + t; camera +x right,+y down,+z forward; meters',
             'robot_to_camera': None, 'warning': 'Board-relative poses are NOT robot mount extrinsics',

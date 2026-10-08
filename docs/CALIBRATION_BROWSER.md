@@ -116,17 +116,20 @@ process adapters verify lifecycle/cancellation only; they do not test mrcal or
 calibrate a physical camera. Existing native mrcal integration tests use
 `importorskip`; generic CI without mrcal does not establish native integration.
 The working desktop environment lacks mrcal, SciPy, mrgingham and
-`mrcal-calibrate-cameras`; native solves and uncertainty/model-comparison checks
-are unrun. A suitable isolated environment
+`mrcal-calibrate-cameras`. A suitable isolated environment
 needs importable mrcal, SciPy, OpenCV, NumPy and the matching mrcal CLI; mrgingham is
 required only when explicitly selected. Verify capability output and run the
 existing native integration test before claiming that backend passed.
 This is not a blanket Mac platform limitation: the
 [Mac setup report and exact lock](MRCAL_MAC_SETUP.md) identifies the matching
 upstream wheel and the separate workspace-local environment now prepared. Its
-native import and doctor checks passed; the single 60-view native test remains
-on hold pending review of its CPU/memory/stopping bounds. The working environment
-and running preview were preserved.
+native import, doctor and bounded 60-view native integration checks passed.
+Four actual OPENCV8/spline fits, held-out residuals, uncertainty/model comparison
+and exact runtime export completed. The resulting candidate remains `needs_review`
+because two diagnostic thresholds failed; it was not activated. See the
+[native evidence report](MRCAL_MAC_NATIVE_CHECK.md). The working environment and
+both existing previews were preserved. mrgingham and physical camera validation
+remain unrun.
 `--fixture-store` must match the desktop application's `--data` directory. The
 harness creates and removes only its own temporary, explicitly invalid calibration
 artifacts to test the real HTTP download. Candidate/native diagnostic display

@@ -2,9 +2,11 @@
 
 The separate workspace-local CPython 3.12 environment is now prepared at
 `data/native-mrcal-mac-env`. Native imports, the real doctor entry point, CLI help
-and dependency consistency checks pass. The working `.venv` package manifest is
-unchanged, and the combined preview remains running. No native calibration solve,
-VM/container launch, camera access or AGI scheduling change was made.
+and dependency consistency checks pass. The bounded 60-view native integration
+test now passes; its calibration candidate remains `needs_review`. The working
+`.venv` package manifest is unchanged, and both existing previews remain running.
+No VM/container launch, camera access or AGI scheduling change was made.
+See [native results and evidence](MRCAL_MAC_NATIVE_CHECK.md).
 
 The inspected host is macOS 26.6.2, Apple Silicon arm64, with CPython 3.12.14.
 Its working desktop environment has OpenCV 4.10.0, NumPy 1.26.4, PyYAML 6.0.3
@@ -86,31 +88,30 @@ needs to be written outside this checkout. The doctor check imports modules and
 finds the real CLI; it does not solve or acquire images. `calibration.py` is the
 entry point; invoking the module alone does not call its `main()`.
 
-## Proposed native test slot, execution on hold
+## Approved bounds and completed native test
 
-Reserve one logical CPU, a 30-minute exclusive slot, 2 GiB available RAM and
-256 MiB artifact space, excluding the environment/cache. Memory and runtime are
-conservative scheduling estimates, not measured peaks or enforceable RSS caps.
+The approved slot requested one compute thread, a 30-minute exclusive slot,
+2 GiB available RAM and 256 MiB artifact space, excluding the environment/cache.
+Memory and runtime were conservative scheduling estimates. The supervisor samples
+aggregate owned-group RSS and artifacts and stops if either exceeds the estimate;
+this is not a kernel-enforced memory cap or an exact RSS peak measurement.
 The test has 60 synthetic 640x480 grayscale views, 35 corners/view, four sequential
 native fits with 300-second per-fit deadlines, then held-out pose fitting and
 24x16 diagnostic grids. The four fits can therefore consume up to 20 minutes;
 the other stages currently have no total deadline of their own.
 
-Before execution, launch the child command below under an own-process-group
-supervisor with a total 1,800-second wall deadline. Timeout or cancellation must
-send SIGTERM to that owned group, then SIGKILL after a five-second grace, and reap
-the child. No preview or unrelated process should be signaled. Those are the
-proposed stopping bounds for review; the test has not been launched.
+The [supervisor](../tools/native_calibration_check.py) applies a total
+1,800-second wall deadline. Timeout, cancellation, unexpected resources or
+monitoring errors terminate the owned process group with SIGTERM, followed by
+SIGKILL after a five-second grace if needed, and reap the direct child. It also
+cleans up descendants after an early child exit. Short sleeping-process checks
+verified deadline, early-exit, cancellation and monitoring-error cleanup. It
+signals no preview or unrelated group. A passing result requires exactly one
+unskipped JUnit test, a completed model report, four solver logs and empty group.
 
 ```sh
-PATH="$PWD/data/native-mrcal-mac-env/bin:$PATH" \
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 VISION_TEST_GUI=0 \
-OPENCV_FOR_THREADS_NUM=1 OPENCV_OPENCL_RUNTIME=disabled \
-OMP_NUM_THREADS=1 OMP_THREAD_LIMIT=1 OMP_DYNAMIC=FALSE \
-OPENBLAS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
-MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 \
-data/native-mrcal-mac-env/bin/python -c \
-'import cv2, mrcal, scipy.optimize, pytest; cv2.setNumThreads(0); cv2.ocl.setUseOpenCL(False); assert cv2.getNumThreads() == 1; raise SystemExit(pytest.main(["-q", "-rs", "-s", "tests/test_guided_calibration.py::test_real_mrcal_full_solve_validation_uncertainty_and_runtime_export"]))'
+.venv/bin/python tools/native_calibration_check.py --self-test
+.venv/bin/python tools/native_calibration_check.py
 ```
 
 The Mac OpenCV wheel uses GCD. Its `getNumThreads()` returns the pool/CPU count
@@ -119,14 +120,16 @@ after a positive setting, so a naive `setNumThreads(1)` assertion is misleading.
 OpenCL was also checked disabled. The loaded NumPy OpenBLAS and mrcal OpenMP pools
 each report one thread under the listed environment. SciPy's Apple Accelerate
 thread request uses `VECLIB_MAXIMUM_THREADS=1`; its peak under a solve has not been
-measured. This requests serial computation, not a macOS CPU-affinity guarantee.
+separately measured. This requests serial computation, not a macOS CPU-affinity guarantee.
 See the pinned [OpenCV 4.10 parallel implementation](https://github.com/opencv/opencv/blob/4.10.0/modules/core/src/parallel.cpp).
 
 This test uses 60 synthetic views and exercises actual OPENCV8/spline fits,
 held-out residuals, sampling uncertainty, model comparison, retained optimization
-inputs and exact runtime export. It currently remains unrun here. Passing would
-establish software integration with synthetic data; independent physical camera,
-board, mount, timing and motion validation would still be required.
+inputs and exact runtime export. It passed with four real fits on this Mac;
+held-out RMS was 0.120281 px for OPENCV8 and 0.134952 px for spline. The candidate
+stays under review because spline sampling uncertainty and model disagreement
+exceed their review thresholds. These are synthetic software results; independent
+physical camera, board, mount, timing and motion validation remains required.
 
 For later desktop launches, put the isolated solver's `bin` directory on `PATH`
 and pass its interpreter to `tools/calibration_dashboard.py --solver-python`.
