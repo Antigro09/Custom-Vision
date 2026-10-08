@@ -1,5 +1,5 @@
 {
-  "description": "Literal synthetic configuration inputs used for portable corpus regeneration; not surveyed or measured field geometry.",
+  "description": "Literal normalized synthetic configuration inputs used for portable corpus regeneration; not surveyed or measured field geometry.",
   "layouts": {
     "scene": {
       "field": {
@@ -35,10 +35,10 @@
             },
             "rotation": {
               "quaternion": {
-                "W": 0.17364817766693022,
+                "W": 0.17364817766693025,
                 "X": 0.0,
                 "Y": 0.0,
-                "Z": -0.984807753012208
+                "Z": -0.9848077530122081
               }
             }
           }
@@ -53,10 +53,10 @@
             },
             "rotation": {
               "quaternion": {
-                "W": 0.17364817766693041,
+                "W": 0.17364817766693044,
                 "X": 0.0,
                 "Y": 0.0,
-                "Z": 0.984807753012208
+                "Z": 0.9848077530122081
               }
             }
           }
