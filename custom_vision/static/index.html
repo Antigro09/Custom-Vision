@@ -4,8 +4,10 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>1086 · Custom Vision</title>
 <link rel="stylesheet" href="/static/style.css"><link rel="stylesheet" href="/static/field.css">
+<link rel="stylesheet" href="/static/calibration.css">
 <script defer src="/static/field_model.js"></script><script defer src="/static/field_scene.js"></script>
 <script defer src="/static/field_renderer.js"></script><script defer src="/static/field_dashboard.js"></script><script defer src="/static/app.js"></script>
+<script defer src="/static/calibration_dashboard.js"></script>
 </head>
 <body>
 <header><a class="brand" href="/" aria-label="Custom Vision home"><span class="mark">1086</span><span>CUSTOM <b>VISION</b></span></a><div class="header-meta"><span id="connection" class="badge">Connecting</span><span id="host"></span></div></header>
@@ -14,6 +16,7 @@
 <main>
 <section class="page-heading"><div><div class="eyebrow">TEAM 1086 / VISION CONTROL</div><h1 id="pipeline-title">Camera setup</h1><p id="pipeline-description">Connect a camera to inspect modes and controls.</p></div><label class="toggle"><input id="pipeline-enabled" type="checkbox"> Pipeline enabled</label></section>
 <div id="notice" role="status" aria-live="polite" hidden></div>
+<section id="calibration-workspace" aria-label="Offline camera calibration workspace"></section>
 <section class="field-panel" aria-labelledby="field-heading">
 <div class="field-head"><div><div class="eyebrow">FIELD OBSERVATORY / METERS</div><h2 id="field-heading">Vision in field space</h2><p id="field-source-label">Waiting for a vision observation</p></div><div class="field-mode" role="group" aria-label="Field view mode"><button id="field-mode-2d" class="active" aria-pressed="true">2D plan</button><button id="field-mode-3d" aria-pressed="false">3D perspective</button><button id="field-home" title="Fit geometry and reset view">Fit view</button></div></div>
 <div class="field-workspace"><div class="field-stage"><canvas id="field-canvas" tabindex="0" role="img" aria-label="Field pose visualization. In 3D drag to orbit; arrow keys orbit and plus or minus zoom."></canvas><div class="field-stage-note" id="field-geometry-note">Field geometry unavailable</div><div class="field-compass">FIXED NWU <span>+X forward · +Y left · +Z up</span><span id="field-controls-note">Drag pan · Wheel zoom</span></div></div>
