@@ -115,15 +115,18 @@ Browser QA uses local synthetic chessboard media and real page controls. Synthet
 process adapters verify lifecycle/cancellation only; they do not test mrcal or
 calibrate a physical camera. Existing native mrcal integration tests use
 `importorskip`; generic CI without mrcal does not establish native integration.
-This Mac lacks mrcal, SciPy, mrgingham and `mrcal-calibrate-cameras`; native solves
-and uncertainty/model-comparison checks are unrun. A suitable isolated environment
+The working desktop environment lacks mrcal, SciPy, mrgingham and
+`mrcal-calibrate-cameras`; native solves and uncertainty/model-comparison checks
+are unrun. A suitable isolated environment
 needs importable mrcal, SciPy, OpenCV, NumPy and the matching mrcal CLI; mrgingham is
 required only when explicitly selected. Verify capability output and run the
 existing native integration test before claiming that backend passed.
 This is not a blanket Mac platform limitation: the
-[read-only Mac assessment and isolated setup route](MRCAL_MAC_SETUP.md) identifies
-the matching upstream wheel, exact missing tools and the single native test to run
-in a later approved CPU window. No setup or native solve was executed here.
+[Mac setup report and exact lock](MRCAL_MAC_SETUP.md) identifies the matching
+upstream wheel and the separate workspace-local environment now prepared. Its
+native import and doctor checks passed; the single 60-view native test remains
+on hold pending review of its CPU/memory/stopping bounds. The working environment
+and running preview were preserved.
 `--fixture-store` must match the desktop application's `--data` directory. The
 harness creates and removes only its own temporary, explicitly invalid calibration
 artifacts to test the real HTTP download. Candidate/native diagnostic display

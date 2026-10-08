@@ -1,11 +1,14 @@
-# Native solver assessment on this Mac
+# Native solver setup on this Mac
 
-Read-only assessment, 2026-10-08. No dependency installation, native build,
-solver job, VM/container launch, camera access or AGI scheduling change was made.
+The separate workspace-local CPython 3.12 environment is now prepared at
+`data/native-mrcal-mac-env`. Native imports, the real doctor entry point, CLI help
+and dependency consistency checks pass. The working `.venv` package manifest is
+unchanged, and the combined preview remains running. No native calibration solve,
+VM/container launch, camera access or AGI scheduling change was made.
 
 The inspected host is macOS 26.6.2, Apple Silicon arm64, with CPython 3.12.14.
 Its working desktop environment has OpenCV 4.10.0, NumPy 1.26.4, PyYAML 6.0.3
-and pytest 8.4.2. Missing importable modules are `mrcal`, `scipy`, `numpysane`,
+and pytest 8.4.2. In that working environment, missing importable modules remain `mrcal`, `scipy`, `numpysane`,
 `gnuplotlib`, `shapely` and `fltk` (provided by `pyfltk`). Missing commands are
 `mrcal-calibrate-cameras`, `mrgingham` and `gnuplot`.
 
@@ -28,7 +31,34 @@ The existing solver test does not need FLTK interaction or a displayed window.
 The Mac mrcal wheel excludes mrgingham. Our native integration test explicitly
 uses `opencv-sb`, so mrgingham is unnecessary for that test.
 
-## Minimal next step, not executed
+## Exact isolated lock and completed checks
+
+[requirements-mrcal-macos-cp312.lock](../tools/requirements-mrcal-macos-cp312.lock)
+pins all 15 solver/test/inspection dependencies and their exact official registry
+artifact hashes. It keeps NumPy 1.26.4 and OpenCV 4.10.0.84 aligned with the tested
+desktop algorithms, with SciPy 1.16.3 and mrcal 2.5.2.post1. All 13 binary artifacts
+have wheel tags supported by the inspected CPython 3.12/macOS arm64 host. Only
+numpysane 0.45 and gnuplotlib 0.47 use small pure-Python source distributions.
+No compiled source dependency was built.
+
+The pure-Python packaging backend actually used was setuptools 84.0.0, pinned in
+[requirements-mrcal-python-build.lock](../tools/requirements-mrcal-python-build.lock).
+The new environment's bootstrap pip is 25.0.1. The complete installed inventory,
+install/resolution reports, artifact manifest and logs are retained under ignored
+`data/native-mrcal-setup/`. The installed environment occupies approximately
+454 MiB, before caches; this is a measured disk figure, not a memory requirement.
+
+Ten native/analysis module imports passed, including SciPy optimization/linear
+algebra and the actual mrcal extension. The doctor located the isolated CLI and
+imported mrcal, OpenCV and SciPy. mrcal does not expose `__version__`; its doctor
+fallback prints `distro-package`, but distribution metadata verifies the installed
+wheel version is exactly 2.5.2.post1. `pip check` reports no broken requirements.
+The real CLI help accepts all nine flags used by the current adapter, and
+`pytest --collect-only` collected exactly the requested native integration test.
+Collection generated no views and performed no calibration.
+mrgingham remains absent and is unnecessary for the existing `opencv-sb` test.
+
+## Reproduction in a fresh checkout
 
 Create a new isolated solver environment inside ignored `data/`, using the
 existing interpreter. Require published binaries for compiled dependencies;
@@ -38,28 +68,59 @@ stop and inspect the error instead of launching a source build.
 
 ```sh
 .venv/bin/python -m venv data/native-mrcal-mac-env
-data/native-mrcal-mac-env/bin/python -m pip install \
-  --only-binary=:all: --no-binary=numpysane,gnuplotlib \
-  'mrcal==2.5.2.post1' 'pyfltk==1.4.5.0' 'pytest==8.4.2'
+data/native-mrcal-mac-env/bin/python -m pip --isolated install --require-hashes \
+  -r tools/requirements-mrcal-python-build.lock
+data/native-mrcal-mac-env/bin/python -m pip --isolated install --require-hashes \
+  --no-build-isolation -r tools/requirements-mrcal-macos-cp312.lock
 PATH="$PWD/data/native-mrcal-mac-env/bin:$PATH" \
 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
-data/native-mrcal-mac-env/bin/python -m custom_vision.calibration_session doctor \
+data/native-mrcal-mac-env/bin/python calibration.py doctor \
   --mrcal-python "$PWD/data/native-mrcal-mac-env/bin/python"
-data/native-mrcal-mac-env/bin/python -m pip freeze \
+data/native-mrcal-mac-env/bin/python -m pip --isolated freeze --all \
   > data/native-mrcal-mac-env/installed-versions.txt
 ```
 
 This leaves the existing `.venv`, Jetson camera/GPU stack and system Python
-unchanged. The doctor check imports modules and finds the real CLI; it does not
-solve or acquire images. Run the one native test in a separately approved CPU
-window, after the doctor succeeds:
+unchanged. Use a workspace-local pip cache when reproducing; no cache or package
+needs to be written outside this checkout. The doctor check imports modules and
+finds the real CLI; it does not solve or acquire images. `calibration.py` is the
+entry point; invoking the module alone does not call its `main()`.
+
+## Proposed native test slot, execution on hold
+
+Reserve one logical CPU, a 30-minute exclusive slot, 2 GiB available RAM and
+256 MiB artifact space, excluding the environment/cache. Memory and runtime are
+conservative scheduling estimates, not measured peaks or enforceable RSS caps.
+The test has 60 synthetic 640x480 grayscale views, 35 corners/view, four sequential
+native fits with 300-second per-fit deadlines, then held-out pose fitting and
+24x16 diagnostic grids. The four fits can therefore consume up to 20 minutes;
+the other stages currently have no total deadline of their own.
+
+Before execution, launch the child command below under an own-process-group
+supervisor with a total 1,800-second wall deadline. Timeout or cancellation must
+send SIGTERM to that owned group, then SIGKILL after a five-second grace, and reap
+the child. No preview or unrelated process should be signaled. Those are the
+proposed stopping bounds for review; the test has not been launched.
 
 ```sh
 PATH="$PWD/data/native-mrcal-mac-env/bin:$PATH" \
-OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
-data/native-mrcal-mac-env/bin/python -m pytest -q -rs \
-  tests/test_guided_calibration.py::test_real_mrcal_full_solve_validation_uncertainty_and_runtime_export
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 VISION_TEST_GUI=0 \
+OPENCV_FOR_THREADS_NUM=1 OPENCV_OPENCL_RUNTIME=disabled \
+OMP_NUM_THREADS=1 OMP_THREAD_LIMIT=1 OMP_DYNAMIC=FALSE \
+OPENBLAS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
+MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 \
+data/native-mrcal-mac-env/bin/python -c \
+'import cv2, mrcal, scipy.optimize, pytest; cv2.setNumThreads(0); cv2.ocl.setUseOpenCL(False); assert cv2.getNumThreads() == 1; raise SystemExit(pytest.main(["-q", "-rs", "-s", "tests/test_guided_calibration.py::test_real_mrcal_full_solve_validation_uncertainty_and_runtime_export"]))'
 ```
+
+The Mac OpenCV wheel uses GCD. Its `getNumThreads()` returns the pool/CPU count
+after a positive setting, so a naive `setNumThreads(1)` assertion is misleading.
+`setNumThreads(0)` disables parallel regions and was checked to report one here;
+OpenCL was also checked disabled. The loaded NumPy OpenBLAS and mrcal OpenMP pools
+each report one thread under the listed environment. SciPy's Apple Accelerate
+thread request uses `VECLIB_MAXIMUM_THREADS=1`; its peak under a solve has not been
+measured. This requests serial computation, not a macOS CPU-affinity guarantee.
+See the pinned [OpenCV 4.10 parallel implementation](https://github.com/opencv/opencv/blob/4.10.0/modules/core/src/parallel.cpp).
 
 This test uses 60 synthetic views and exercises actual OPENCV8/spline fits,
 held-out residuals, sampling uncertainty, model comparison, retained optimization

@@ -1,0 +1,21 @@
+# Exact install artifacts for inspected CPython3.12/macOS26 arm64 host.
+# Only numpysane and gnuplotlib use small pure-Python source distributions.
+--index-url https://pypi.org/simple
+--only-binary :all:
+--no-binary numpysane,gnuplotlib
+
+gnuplotlib==0.47 --hash=sha256:35ad06a4adf16dba0e4be0f74615e7beb6b8e0358c4cf5c0f98fef85bc46aac8
+iniconfig==2.3.1 --hash=sha256:9121e2c1fdb355232495be3194c8dfe87ccc2d5dee45947b78e68f499790d7a7
+mrcal==2.5.2.post1 --hash=sha256:1f36ab4bec94a4f0cfd4b102df497a919846b71c5fb728f5e945682c0f511247
+numpy==1.26.4 --hash=sha256:03a8c78d01d9781b28a6989f6fa1bb2c4f2d51201cf99d3dd875df6fbd96b23b
+numpysane==0.45 --hash=sha256:caebeccc2c92d373ee3d850f45d7724cab1067e912efe8a8fa54167f5d1b4a82
+opencv-python-headless==4.10.0.84 --hash=sha256:a4f4bcb07d8f8a7704d9c8564c224c8b064c63f430e95b61ac0bffaa374d330e
+packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+pluggy==1.6.0 --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
+pyfltk==1.4.5.0 --hash=sha256:e640b4b942c401ce67c081b1f638e5752f5c5fca23bda5ef3a33f59eb877886b
+Pygments==2.21.0 --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+pytest==8.4.2 --hash=sha256:872f880de3fc3a5bdc88a11b39c9710c3497a547cfa9320bc3c5e62fbf272e79
+PyYAML==6.0.3 --hash=sha256:fc09d0aa354569bc501d4e787133afc08552722d3ab34836a80547331bb5d4a0
+scipy==1.16.3 --hash=sha256:2b71d93c8a9936046866acebc915e2af2e292b883ed6e2cbe5c34beb094b82d9
+shapely==2.2.0 --hash=sha256:c36ccbff5c3374c349c370bfdac22c7676b268b4a707c98e9031f498965aa02d
+threadpoolctl==3.6.0 --hash=sha256:43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb

@@ -1,0 +1,4 @@
+# Pure-Python packaging backend used for numpysane/gnuplotlib; no native build.
+--index-url https://pypi.org/simple
+--only-binary :all:
+setuptools==84.0.0 --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670
