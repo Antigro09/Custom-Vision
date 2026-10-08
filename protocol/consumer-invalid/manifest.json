@@ -1,0 +1,60 @@
+{
+  "manifest_version": 1,
+  "producer_fixture": false,
+  "cases": [
+    {
+      "name": "negative_packet_seq",
+      "path": "negative_packet_seq.json",
+      "derived_from": "single_tag",
+      "sha256": "81afed0b6922746a76dbb7ed0e52c59174d766c72f045cb053db606e84d90f39",
+      "expected_schema_valid": false,
+      "expected_consumer_accepted": false,
+      "reason": "negative publication sequence"
+    },
+    {
+      "name": "overflow_packet_seq",
+      "path": "overflow_packet_seq.json",
+      "derived_from": "single_tag",
+      "sha256": "299a25c21682bef86831c944c2f4743b5122f8dc8b6dc221c3524d2a568ca8f7",
+      "expected_schema_valid": false,
+      "expected_consumer_accepted": false,
+      "reason": "sequence exceeds exact JSON bound"
+    },
+    {
+      "name": "string_timestamp",
+      "path": "string_timestamp.json",
+      "derived_from": "single_tag",
+      "sha256": "64d7fb12f0bf44ab16989b63c91b74bb2733443cc069776d9bc5f29274f8057c",
+      "expected_schema_valid": false,
+      "expected_consumer_accepted": false,
+      "reason": "timestamp must be integer microseconds"
+    },
+    {
+      "name": "wrong_timing_unit",
+      "path": "wrong_timing_unit.json",
+      "derived_from": "single_tag",
+      "sha256": "61322829e0c1cc6a04f9763cc5ca33e761af6c4d9351b0325158c3e3d8d43d88",
+      "expected_schema_valid": false,
+      "expected_consumer_accepted": false,
+      "reason": "JSON timestamps always use microseconds"
+    },
+    {
+      "name": "dangling_selection",
+      "path": "dangling_selection.json",
+      "derived_from": "objects_compact_covariance_selection",
+      "sha256": "4073b085b440b996040ffc54c27171dc268c0d2124737aafb1ab1e61238fc60a",
+      "expected_schema_valid": true,
+      "expected_consumer_accepted": false,
+      "reason": "selection must resolve in canonical targets"
+    },
+    {
+      "name": "dangling_reference",
+      "path": "dangling_reference.json",
+      "derived_from": "objects_compact_covariance_selection",
+      "sha256": "846ba934917f29a5a236a05e574ea63b22da97d31ab32e8a7bc4d322fff75fef",
+      "expected_schema_valid": true,
+      "expected_consumer_accepted": false,
+      "reason": "compact reference must resolve in canonical targets"
+    }
+  ]
+}

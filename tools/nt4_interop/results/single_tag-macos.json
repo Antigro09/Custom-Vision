@@ -1,0 +1,50 @@
+{
+  "status": "passed",
+  "recorded_at_utc": "2026-10-08T01:02:44.947832+00:00",
+  "checks": [
+    "pinned_python_connects_to_released_alpha7_java_server",
+    "python_private_now_and_offset_are_microseconds_java_now_is_nanoseconds",
+    "coherent_string_exact_integer_us_and_six_decimal_float_roundtrip",
+    "queued_strings_are_whole_known_publications",
+    "disconnect_suppresses_capture_server_time_even_if_camera_connected",
+    "reconnect_reacquires_clock_offset_and_publication",
+    "late_subscriber_receives_retained_old_packet_after_source_close"
+  ],
+  "evidence": {
+    "python_offset_us": -1790017696232013,
+    "python_nt_now_us": 1791421363781110,
+    "java_nt_now_ns": 1403667549226208,
+    "capture_server_us": 1403667549380,
+    "java_timestamp_ns": 1403667550171000,
+    "java_server_time_ns": 1403667550171000,
+    "java_queue_count": 5,
+    "fixture_sha256": "92cc685066cc44db90928d561945baa1bce8895519c115d20d046f0d7b50eed0",
+    "producer_files_sha256": {
+      "custom_vision/publisher.py": "779866140c599a8c1248dd6419d23e2d5dce1334fe3dcd4ec0ce6d8a0e924c41",
+      "custom_vision/nt_clock.py": "65c673bd55b379bb8a3e67759f57afd184c838eac1634b1bab34ddc77a4282d4"
+    }
+  },
+  "python_producer": "pyntcore==2024.3.2.1",
+  "java_server": "org.wpilib.ntcore:2027.0.0-alpha-7",
+  "java_runtime": [
+    "openjdk version \"25.0.4.1\" 2026-08-18 LTS",
+    "OpenJDK Runtime Environment Temurin-25.0.4.1+1 (build 25.0.4.1+1-LTS)",
+    "OpenJDK 64-Bit Server VM Temurin-25.0.4.1+1 (build 25.0.4.1+1-LTS, mixed mode, sharing)"
+  ],
+  "artifacts_lock_sha256": "cec4ca5795732c1f253952db8b8bea7c77a581b129b940cd2f01b4f415011634",
+  "host": {
+    "platform": "darwin",
+    "python": "3.12.14"
+  },
+  "fixture": "protocol/fixtures/single_tag.json",
+  "boundaries": [
+    "desktop localhost only",
+    "no camera/HAL/controller hardware",
+    "no exposure/capture-correction measurement",
+    "no worst-case-load qualification"
+  ],
+  "producer_revision": "425e5b43b594f65ce6db4038d8c3bf3c5039a6fd",
+  "producer_revision_matches_recorded_source_hashes": true,
+  "protocol_profile": "custom-vision-schema2-2026.1",
+  "provenance_note": "Producer commit mapping added after run by checking recorded producer-file hashes against this commit; no repeated transport run."
+}

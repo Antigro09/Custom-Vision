@@ -1,0 +1,63 @@
+{
+  "wpilib_version": "2027.0.0-alpha-7",
+  "java_release": 25,
+  "python_producer": "pyntcore==2024.3.2.1",
+  "host_profile": "macos-universal",
+  "artifacts": [
+    {
+      "name": "ntcore-java-2027.0.0-alpha-7.jar",
+      "url": "https://frcmaven.wpi.edu/artifactory/api/download/release/org/wpilib/ntcore/ntcore-java/2027.0.0-alpha-7/ntcore-java-2027.0.0-alpha-7.jar",
+      "sha256": "63867e59b758bf63e82fe11b19c6fb6335396c7a828788fcc121ed26dff21e49",
+      "bytes": 144352
+    },
+    {
+      "name": "ntcore-cpp-2027.0.0-alpha-7-osxuniversal.zip",
+      "url": "https://frcmaven.wpi.edu/artifactory/api/download/release/org/wpilib/ntcore/ntcore-cpp/2027.0.0-alpha-7/ntcore-cpp-2027.0.0-alpha-7-osxuniversal.zip",
+      "sha256": "49c307870055518bf337fc3518c1905bac9f95bff05b7918a2616f7797f820e5",
+      "bytes": 1109995
+    },
+    {
+      "name": "wpiutil-java-2027.0.0-alpha-7.jar",
+      "url": "https://frcmaven.wpi.edu/artifactory/api/download/release/org/wpilib/wpiutil/wpiutil-java/2027.0.0-alpha-7/wpiutil-java-2027.0.0-alpha-7.jar",
+      "sha256": "086803153340e3070b1f0c4a297b4775f920f6ed53cd134c6d8b28ed19d4b664",
+      "bytes": 108752
+    },
+    {
+      "name": "wpiutil-cpp-2027.0.0-alpha-7-osxuniversal.zip",
+      "url": "https://frcmaven.wpi.edu/artifactory/api/download/release/org/wpilib/wpiutil/wpiutil-cpp/2027.0.0-alpha-7/wpiutil-cpp-2027.0.0-alpha-7-osxuniversal.zip",
+      "sha256": "6f786cf70b005389a8c5f171b6c499ec693f19cc6aababc8150c2312fcc9e715",
+      "bytes": 894560
+    },
+    {
+      "name": "wpinet-java-2027.0.0-alpha-7.jar",
+      "url": "https://frcmaven.wpi.edu/artifactory/api/download/release/org/wpilib/wpinet/wpinet-java/2027.0.0-alpha-7/wpinet-java-2027.0.0-alpha-7.jar",
+      "sha256": "68405d182a74cce68dfaff2f9cab08553b09430835cf5ee13eed3b5475fe7494",
+      "bytes": 7031
+    },
+    {
+      "name": "wpinet-cpp-2027.0.0-alpha-7-osxuniversal.zip",
+      "url": "https://frcmaven.wpi.edu/artifactory/api/download/release/org/wpilib/wpinet/wpinet-cpp/2027.0.0-alpha-7/wpinet-cpp-2027.0.0-alpha-7-osxuniversal.zip",
+      "sha256": "136ba202fd348b24c091412b56ba39045d676755482c743c0b0c10308819b11b",
+      "bytes": 1419657
+    },
+    {
+      "name": "datalog-java-2027.0.0-alpha-7.jar",
+      "url": "https://frcmaven.wpi.edu/artifactory/api/download/release/org/wpilib/datalog/datalog-java/2027.0.0-alpha-7/datalog-java-2027.0.0-alpha-7.jar",
+      "sha256": "1aa1042c101e159824aba21635c9750cce0545c7c06051248365d7584539ae70",
+      "bytes": 41256
+    },
+    {
+      "name": "datalog-cpp-2027.0.0-alpha-7-osxuniversal.zip",
+      "url": "https://frcmaven.wpi.edu/artifactory/api/download/release/org/wpilib/datalog/datalog-cpp/2027.0.0-alpha-7/datalog-cpp-2027.0.0-alpha-7-osxuniversal.zip",
+      "sha256": "281c70de2f9b75263eb51afb97f96ce1e64240332a9d72190b85cbbfdc51a5f7",
+      "bytes": 344803
+    }
+  ],
+  "jdk": {
+    "version": "Temurin 25.0.4.1+1",
+    "name": "jdk25.tar.gz",
+    "url": "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4.1%2B1/OpenJDK25U-jdk_aarch64_mac_hotspot_25.0.4.1_1.tar.gz",
+    "sha256": "61979887f7506a24a57439ff99adb8b3a7fc89977d9cfe3b8984f58a981b7b9d",
+    "bytes": 136355078
+  }
+}
