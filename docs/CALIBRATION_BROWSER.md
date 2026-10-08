@@ -21,6 +21,21 @@ isolated mrcal interpreter. The application probes that interpreter and installs
 nothing. Stop it with Ctrl-C; owned jobs are canceled and saved inputs remain.
 The normal vision dashboard provides a launch hint without starting this service.
 
+The local `vision/calibration-workspace` branch includes the field visualization
+commits; no branch switch is needed to review both. To open both workspaces on
+one page with explicitly synthetic field observations:
+
+```sh
+OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 .venv/bin/python tools/field_dashboard_preview.py \
+  --port 5844 --calibration-data data/workspace-preview
+```
+
+Open `http://127.0.0.1:5844`. The visible synthetic notice applies to field fixture
+playback only; imported calibration media and jobs are separate. This preview
+disables camera discovery/acquisition, NT and hardware activation. No calibration
+solve runs merely by opening it. Ctrl-C stops the server and cancels its own jobs;
+saved imports remain. This optional desktop preview starts no normal vision runtime.
+
 ## Import, review, solve and export
 
 1. Describe the physical camera and recording history. OV9281 and OV2311 are
@@ -105,6 +120,10 @@ and uncertainty/model-comparison checks are unrun. A suitable isolated environme
 needs importable mrcal, SciPy, OpenCV, NumPy and the matching mrcal CLI; mrgingham is
 required only when explicitly selected. Verify capability output and run the
 existing native integration test before claiming that backend passed.
+This is not a blanket Mac platform limitation: the
+[read-only Mac assessment and isolated setup route](MRCAL_MAC_SETUP.md) identifies
+the matching upstream wheel, exact missing tools and the single native test to run
+in a later approved CPU window. No setup or native solve was executed here.
 `--fixture-store` must match the desktop application's `--data` directory. The
 harness creates and removes only its own temporary, explicitly invalid calibration
 artifacts to test the real HTTP download. Candidate/native diagnostic display

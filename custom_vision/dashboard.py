@@ -109,7 +109,7 @@ class Dashboard:
                         # UVC enumeration is slow; cache for two seconds and keep it
                         # away from the inference thread and preview lock.
                         with owner._writes:
-                            if owner.config.get("calibration_only"):
+                            if owner.config.get("calibration_only") or owner.config.get("offline_preview"):
                                 owner._device_cache = {"devices": [], "note": "Offline imports only; camera discovery is disabled."}
                             elif time.monotonic() >= owner._device_cache_until:
                                 owner._device_cache = discover_devices()

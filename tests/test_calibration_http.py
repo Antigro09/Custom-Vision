@@ -61,6 +61,41 @@ def request(instance, path, data=None, headers=None):
         return (json.loads(body) if response.headers.get_content_type() == "application/json" else body), dict(response.headers)
 
 
+def test_combined_preview_serves_both_without_camera_discovery_or_activation(monkeypatch):
+    from custom_vision import dashboard as module
+    from tools.field_dashboard_preview import ReplayConfig
+
+    def forbidden_discovery():
+        raise AssertionError("An offline preview must not inspect cameras")
+
+    monkeypatch.setattr(module, "discover_devices", forbidden_discovery)
+    jobs = Jobs()
+    preview = Dashboard({"host": "127.0.0.1", "port": 0, "offline_preview": True},
+                        ReplayConfig(None), calibration_jobs=jobs)
+    try:
+        preview.update({"pipeline": "front_tags", "input_kind": "synthetic", "frame_id": 1})
+        page, _ = request(preview, "/")
+        assert b'field-canvas' in page and b'calibration-workspace' in page
+        assert b'calibration_dashboard.js' in page and b'field_dashboard.js' in page
+        setup, _ = request(preview, "/api/config")
+        assert setup["writable"] is False
+        assert "SYNTHETIC LOCAL PREVIEW" in setup["config"]["dashboard"]["preview_notice"]
+        assert request(preview, "/api/devices")[0]["devices"] == []
+        assert request(preview, "/api/devices")[0]["devices"] == []
+        assert request(preview, "/api/field-view")[0]["results"]["front_tags"]["input_kind"] == "synthetic"
+        assert request(preview, "/api/calibration/capabilities")[0]["runtime_activation"] is False
+        assert request(preview, "/api/calibration/assets", {"file_name": "synthetic.png"})[0]["asset_id"] == "synthetic-asset"
+        with pytest.raises(HTTPError) as error:
+            request(preview, "/api/config", {"pipelines": []})
+        assert error.value.code == 405
+        with pytest.raises(HTTPError) as error:
+            request(preview, "/api/calibration/candidates/synthetic/activate", {"pipeline": "front_tags", "confirmed": True})
+        assert error.value.code == 400
+    finally:
+        preview.close()
+    assert jobs.closed
+
+
 def test_offline_jobs_write_without_runtime_controller(service):
     dashboard, jobs = service
     caps, _ = request(dashboard, "/api/calibration/capabilities")

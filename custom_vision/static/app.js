@@ -174,7 +174,7 @@ async function loadConfiguration() {
   state.devices = devices.devices || [];
   if (!selectedPipeline()) state.selected = state.config.pipelines?.[0]?.name;
   buildNav(); populatePipeline(); setBusy(false);
-  if (!state.writable) notice('This dashboard is read-only. Start the runtime with a configuration controller to enable setup.');
+  if (!state.writable) notice(state.config.dashboard?.preview_notice || 'This dashboard is read-only. Start the runtime with a configuration controller to enable setup.');
   $('connection').textContent = 'Connected'; $('connection').className = 'badge live';
 }
 function collectSettings() {
