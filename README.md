@@ -105,6 +105,7 @@ always disables NT. It tests geometry and controls, not neural-model accuracy.
 
 - [Camera modes and exposure](docs/cameras.md)
 - [Intrinsic calibration](docs/apriltags.md)
+- [Guided chessboard calibration and saved-image diagnostics](docs/guided-chessboard-calibration.md)
 - [Field coordinates, mounting and MultiTag](docs/localization.md)
 - [Tag-relative POI aiming, FPS and CUDA PnP](docs/POI_AND_CUDA_POSE.md)
 - [September 20 Jetson verification and paired CUDA measurements](docs/CUDA_VERIFICATION_2026-09-20.md)

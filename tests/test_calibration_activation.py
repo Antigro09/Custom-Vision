@@ -8,6 +8,7 @@ import yaml
 
 from custom_vision.control import RuntimeController
 from custom_vision.revisions import geometry_revisions
+from custom_vision.calibration_review import review_candidate
 
 
 def calibration(focal=500, width=640, height=480):
@@ -16,11 +17,13 @@ def calibration(focal=500, width=640, height=480):
             'dist_coeffs':[0,0,0,0,0]}
 
 
-def metadata():
-    return {'camera':{'physical_id':'measured-camera-a','user_label':'manual label is not identity',
+def metadata(data=None):
+    result= {'camera':{'physical_id':'measured-camera-a','user_label':'manual label is not identity',
                       'identity_source':'operator'},
             'mode':{'width':640,'height':480,'crop':[0,0,640,480],'binning':[1,1],
-                    'focus':{'kind':'fixed','value':5,'locked':True}}}
+                    'focus':{'kind':'manual','value':5,'locked':True}},
+            'quality_status':'heuristics_passed_not_hardware_validated'}
+    return review_candidate(data or calibration(515),result,confirmed=True)
 
 
 @pytest.fixture
@@ -93,9 +96,8 @@ def test_mismatched_calibration_resolution_is_rejected_before_writes(controller,
 
 @pytest.mark.parametrize('section,field,replacement',[
     ('camera','physical_id','another-camera'),('mode','crop',[0,0,320,240]),
-    ('mode','binning',[2,2]),('mode','focus',{'kind':'fixed','value':6,'locked':True}),
-    ('mode','focus',{'kind':'adjustable','value':5,'locked':True}),
-    ('mode','focus',{'kind':'fixed','value':5,'locked':False}),
+    ('mode','binning',[2,2]),('mode','focus',{'kind':'manual','value':6,'locked':True}),
+    ('mode','focus',{'kind':'fixed','value':5,'locked':True}),
 ])
 def test_known_physical_provenance_mismatch_is_rejected(controller,section,field,replacement):
     original=controller.path.read_bytes()
@@ -115,13 +117,12 @@ def test_candidate_mode_metadata_must_agree_with_calibration(controller,field,va
         controller.activate_calibration_candidate('front_tags',calibration(515),provenance)
 
 
-def test_unknown_provenance_warns_and_never_claims_verification(controller):
-    result=controller.activate_calibration_candidate('front_tags',calibration(515))
-    assert result['physical_verification'] is False
-    assert any('physical camera identity provenance is unknown' in warning for warning in result['warnings'])
-    for field in ('crop','binning','focus'):
-        assert any(field in warning and 'unknown' in warning for warning in result['warnings'])
-    assert controller.get_config()['pipelines'][0]['poi']['calibration_verified'] is False
+def test_unknown_provenance_rejects_before_any_write(controller):
+    original=controller.path.read_bytes()
+    with pytest.raises(ValueError,match='Candidate metadata'):
+        controller.activate_calibration_candidate('front_tags',calibration(515))
+    assert controller.path.read_bytes()==original
+    assert controller.list_calibration_activations()==[]
 
 
 def test_manual_camera_label_and_source_are_not_physical_identity(controller):
@@ -130,24 +131,25 @@ def test_manual_camera_label_and_source_are_not_physical_identity(controller):
     controller.path.write_text(yaml.safe_dump(config))
     provenance=metadata()
     provenance['camera']['user_label']='0'
-    result=controller.activate_calibration_candidate('front_tags',calibration(515),provenance)
-    assert any('physical camera identity provenance is unknown' in warning for warning in result['warnings'])
+    with pytest.raises(ValueError,match='physical camera identity provenance is unknown'):
+        controller.activate_calibration_candidate('front_tags',calibration(515),provenance)
 
 
-def test_unknown_focus_kind_and_default_lock_are_warnings_not_measured_conflicts(controller):
-    provenance=metadata()
-    provenance['mode']['focus']={'kind':'unknown','value':None,'locked':False}
-    result=controller.activate_calibration_candidate('front_tags',calibration(515),provenance)
-    for field in ('kind','value','locked'):
-        assert any(f'focus {field} provenance is unknown' in warning for warning in result['warnings'])
-    assert result['physical_verification'] is False
+def test_unknown_focus_kind_and_unverified_lock_block_activation(controller):
+    for focus in ({'kind':'unknown','value':None,'locked':False},
+                  {'kind':'manual','value':5,'locked':False}):
+        provenance=metadata()
+        provenance['mode']['focus']=focus
+        with pytest.raises(ValueError,match='focus'):
+            controller.activate_calibration_candidate('front_tags',calibration(515),provenance)
+    assert controller.list_calibration_activations()==[]
 
 
 def test_explicit_same_calibration_activation_still_requires_new_verification(controller):
     before=controller.get_config()
     validations=[]
     controller.validate_runtime=validations.append
-    result=controller.activate_calibration_candidate('front_tags',calibration(),metadata())
+    result=controller.activate_calibration_candidate('front_tags',calibration(),metadata(calibration()))
     assert controller.get_config()['pipelines'][0]['calibration']==before['pipelines'][0]['calibration']
     assert controller.get_config()['pipelines'][0]['poi']['calibration_verified'] is False
     assert validations[0]['pipelines'][0]['poi']['calibration_verified'] is False
@@ -163,6 +165,7 @@ def test_restore_changes_only_previous_calibration_and_verification(controller):
     current['pipelines'][1]['camera']['fps']=60
     current['dashboard']['port']=5810
     controller.apply_config(current)
+    current=controller.get_config()
     restored=controller.restore_calibration_activation(activated['activation_id'])
     saved=controller.get_config()
     assert restored['restored'] and restored['restore_status']=='applied'
@@ -350,3 +353,149 @@ def test_unknown_activation_and_unknown_pipeline_are_rejected(controller):
     with pytest.raises(ValueError,match='Unknown pipeline'):
         controller.activate_calibration_candidate('missing',calibration(),metadata())
     assert controller.list_calibration_activations()==[]
+
+
+@pytest.mark.parametrize('quality',['needs_review','failed','selection_requires_review'])
+def test_unacceptable_candidate_quality_cannot_activate_even_when_confirmation_is_true(controller,quality):
+    original=controller.path.read_bytes()
+    provenance=metadata()
+    provenance['quality_status']=quality
+    provenance['review']['quality_status']=quality
+    candidate=calibration(515)
+    candidate['quality_status']=quality
+    with pytest.raises(ValueError,match='quality'):
+        controller.activate_calibration_candidate('front_tags',candidate,provenance)
+    assert controller.path.read_bytes()==original
+    assert controller.list_calibration_activations()==[]
+
+
+def test_candidate_activation_requires_review_of_current_geometry(controller):
+    original=controller.path.read_bytes()
+    for provenance in (None,metadata()):
+        if provenance is None:
+            provenance=metadata()
+            provenance.pop('review')
+        with pytest.raises(ValueError,match='explicit review'):
+            controller.activate_calibration_candidate('front_tags',calibration(535),provenance)
+    assert controller.path.read_bytes()==original
+    assert controller.list_calibration_activations()==[]
+
+
+def test_synthetic_cannot_activate_despite_matching_manually_declared_identity_and_review(controller):
+    provenance=metadata()
+    provenance['synthetic']=True
+    with pytest.raises(ValueError,match='Synthetic'):
+        controller.activate_calibration_candidate('front_tags',calibration(515),provenance)
+    assert controller.list_calibration_activations()==[]
+
+
+@pytest.mark.parametrize('change',['identity','crop','binning','focus','source','fps'])
+@pytest.mark.parametrize('previous_present',[True,False])
+def test_restore_blocks_changed_camera_or_mode_even_without_previous_calibration(controller,change,previous_present):
+    config=controller.get_config()
+    if not previous_present:
+        config['pipelines'][0].pop('calibration')
+        controller.path.write_text(yaml.safe_dump(config))
+    activated=controller.activate_calibration_candidate('front_tags',calibration(515),metadata())
+    current=controller.get_config()
+    camera=current['pipelines'][0]['camera']
+    if change=='identity': camera['physical_id']='camera-b'
+    elif change=='source': camera['source']=1
+    elif change=='fps': camera['fps']=60
+    elif change=='crop': camera['mode']['crop']=[1,0,640,480]
+    elif change=='binning': camera['mode']['binning']=[2,2]
+    else: camera['mode']['focus']['value']=6
+    controller.path.write_text(yaml.safe_dump(current))
+    original=controller.path.read_bytes()
+    with pytest.raises(ValueError,match='changed since activation'):
+        controller.restore_calibration_activation(activated['activation_id'])
+    assert controller.path.read_bytes()==original
+
+
+def test_restore_blocks_in_place_active_geometry_replacement(controller):
+    activated=controller.activate_calibration_candidate('front_tags',calibration(515),metadata())
+    active_path=controller.path.parent/controller.get_config()['pipelines'][0]['calibration']
+    active_path.write_text(json.dumps(calibration(540)))
+    original=controller.path.read_bytes()
+    with pytest.raises(ValueError,match='Active calibration artifact changed'):
+        controller.restore_calibration_activation(activated['activation_id'])
+    assert controller.path.read_bytes()==original
+
+
+def test_active_status_requires_review_exact_provenance_and_physical_acknowledgement(controller):
+    # A legacy/raw selected file does not prove exact camera/mode compatibility.
+    assert controller.calibration_status('front_tags')['state']=='custom_active_unverified'
+    controller.activate_calibration_candidate('front_tags',calibration(515),metadata())
+    active=controller.calibration_status('front_tags')
+    assert active['state']=='custom_active_unverified' and active['software_reviewed']
+    assert not active['physical_verification']
+    config=controller.get_config()
+    config['pipelines'][0]['poi']['calibration_verified']=True
+    controller.apply_config(config)
+    checked=controller.calibration_status('front_tags')
+    assert checked['state']=='custom_active_validated' and checked['physical_verification']
+    assert len(controller.calibration_status())==2
+    public=json.dumps(controller.calibration_status())
+    for private in ('camera-','original-calibration.json','measured-camera-a','private-password',str(controller.path)):
+        assert private not in public
+
+
+def test_active_status_identifies_missing_default_mismatch_and_stale_geometry(controller):
+    config=controller.get_config()
+    config['pipelines'][0].pop('calibration')
+    controller.path.write_text(yaml.safe_dump(config))
+    assert controller.calibration_status('front_tags')['state']=='missing'
+    data=calibration()
+    data['calibrator']='nominal'
+    controller.upload_calibration('front_tags',data)
+    assert controller.calibration_status('front_tags')['state']=='default'
+    controller.activate_calibration_candidate('front_tags',calibration(515),metadata())
+    config=controller.get_config()
+    active_path=controller.path.parent/config['pipelines'][0]['calibration']
+    active_path.write_text(json.dumps(calibration(530)))
+    assert controller.calibration_status('front_tags')['state']=='stale'
+    config['pipelines'][0]['camera']['width']=800
+    controller.path.write_text(yaml.safe_dump(config))
+    assert controller.calibration_status('front_tags')['state']=='mode_mismatch'
+    active_path.unlink()
+    assert controller.calibration_status('front_tags')['state']=='missing'
+
+
+def test_camera_mode_edit_clears_physical_acknowledgement_before_runtime_validation(controller):
+    controller.activate_calibration_candidate('front_tags',calibration(515),metadata())
+    config=controller.get_config()
+    config['pipelines'][0]['poi']['calibration_verified']=True
+    controller.apply_config(config)
+    config=controller.get_config()
+    config['pipelines'][0]['camera']['mode']['focus']['value']=6
+    validations=[]
+    controller.validate_runtime=validations.append
+    result=controller.apply_config(config)
+    assert result['poi_verification_reset']==['front_tags']
+    assert validations[0]['pipelines'][0]['poi']['calibration_verified'] is False
+    assert controller.calibration_status('front_tags')['state']=='mode_mismatch'
+
+
+def test_conflicting_configured_mode_resolution_blocks_activation(controller):
+    config=controller.get_config()
+    config['pipelines'][0]['camera']['mode']['width']=800
+    controller.path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError,match='conflicts with its capture resolution'):
+        controller.activate_calibration_candidate('front_tags',calibration(515),metadata())
+    assert controller.list_calibration_activations()==[]
+
+
+def test_legacy_raw_import_of_needs_review_warns_and_clears_even_same_file_acknowledgement(controller):
+    data=calibration()
+    data['quality_status']='needs_review'
+    controller.upload_calibration('front_tags',data)
+    config=controller.get_config()
+    config['pipelines'][0]['poi']['calibration_verified']=True
+    controller.path.write_text(yaml.safe_dump(config))
+    previous_reference=config['pipelines'][0]['calibration']
+    result=controller.upload_calibration('front_tags',data)
+    assert result['quality_warning']
+    current=controller.get_config()['pipelines'][0]
+    assert current['calibration']==previous_reference
+    assert current['poi']['calibration_verified'] is False
+    assert controller.calibration_status('front_tags')['state']=='custom_active_unverified'

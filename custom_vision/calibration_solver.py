@@ -1,6 +1,6 @@
 """Isolated mrcal worker. Execute with distro Python, not the Jetson GPU venv.
 
-Actual mrcal solves, time-block held-out lens validation, projection uncertainty,
+Actual mrcal solves, explicitly selected held-out lens validation, projection uncertainty,
 and exact OPENCV8 export. A spline model is NEVER relabeled as OpenCV distortion.
 """
 from __future__ import annotations
@@ -9,6 +9,7 @@ from datetime import datetime
 import hashlib
 import json
 import math
+from numbers import Real
 import operator
 from pathlib import Path
 import shutil
@@ -24,19 +25,37 @@ from custom_vision.calibration import validate_calibration
 from custom_vision.calibration_session import Board, grid_coverage, load_session, write_json
 
 
-def split_views(views, seed=1086):
-    """Hold out whole 3-second blocks, not neighboring near-duplicate frames.
+IMAGE_GROUP_SIZE = 5
 
-    This mitigates temporal leakage, but a second independent capture is stronger.
+
+def split_views(views, seed=1086, *, validation_basis='time_blocks'):
+    """Hold out whole deterministic groups of observations.
+
+    The default groups real source timestamps into 3-second blocks to mitigate
+    temporal leakage. ``image_groups`` groups consecutive selected images in
+    groups of five when temporal provenance is unavailable; it supplies no
+    evidence of elapsed time or temporal independence. Neither mode is an
+    independent recapture or a physical calibration accuracy certificate.
     """
+    if validation_basis not in ('time_blocks', 'image_groups'):
+        raise ValueError('validation_basis must be time_blocks or image_groups')
     groups = {}
     for index, view in enumerate(views):
-        stamp = float(view['source_time_s'])
-        if not math.isfinite(stamp) or stamp < 0:
-            raise ValueError('Invalid source timestamp')
-        groups.setdefault(int(stamp // 3), []).append(index)
+        if validation_basis == 'time_blocks':
+            try:
+                stamp = float(view['source_time_s'])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError('Invalid source timestamp for time-block validation') from exc
+            if not math.isfinite(stamp) or stamp < 0:
+                raise ValueError('Invalid source timestamp')
+            key = int(stamp // 3)
+        else:
+            key = index // IMAGE_GROUP_SIZE
+        groups.setdefault(key, []).append(index)
     if len(groups) < 5:
-        raise ValueError('Need at least five separate 3-second time blocks; record more diverse views')
+        if validation_basis == 'time_blocks':
+            raise ValueError('Need at least five separate 3-second time blocks; record more diverse views')
+        raise ValueError('Need at least five sequential image groups; capture more diverse views')
     order = list(groups)
     np.random.default_rng(seed).shuffle(order)
     held = []
@@ -46,7 +65,8 @@ def split_views(views, seed=1086):
         held += groups[key]
     training = sorted(set(range(len(views))) - set(held))
     if len(training) < 10:
-        raise ValueError('Too few training views after time-block holdout; collect a longer sequence')
+        label = 'time-block' if validation_basis == 'time_blocks' else 'image-group'
+        raise ValueError(f'Too few training views after {label} holdout; collect a longer sequence')
     return training, sorted(held)
 
 
@@ -260,8 +280,26 @@ def board_poses(model, indices, views):
         transform = np.eye(4)
         transform[:3, :3] = cv2.Rodrigues(rt[:3])[0]
         transform[:3, 3] = rt[3:]
-        records.append({'image': views[selected_index]['image'],
-                         'camera_cv_T_board': transform.tolist()})
+        view = views[selected_index]
+        record = {'image': view['image'], 'camera_cv_T_board': transform.tolist()}
+        # A final detector may reverse a symmetric chessboard relative to the
+        # capture preview. Retain the observations used by this actual solve;
+        # never infer/relabel physical orientation or substitute preview corners.
+        if 'corners' in view:
+            corners = view['corners']
+            try:
+                if (not isinstance(corners, (list, tuple, np.ndarray)) or not 1 <= len(corners) <= 1600
+                        or any(not isinstance(q, (list, tuple, np.ndarray)) or len(q) != 2
+                               or any(isinstance(v, (bool, np.bool_)) or not isinstance(v, Real) for v in q)
+                               for q in corners)):
+                    raise ValueError
+                observed = np.asarray(corners, dtype=float)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError('Final solved corner observations must be a numeric Nx2 array with 1..1600 corners') from exc
+            if observed.shape != (len(corners), 2) or not np.isfinite(observed).all():
+                raise ValueError('Final solved corner observations must be a finite Nx2 array')
+            record.update(observed_corners_px=observed.tolist(), observed_corner_source='solver_final_detection')
+        records.append(record)
     return {'convention': 'p_camera_cv = R @ p_board + t; camera +x right,+y down,+z forward; meters',
             'robot_to_camera': None, 'warning': 'Board-relative poses are NOT robot mount extrinsics',
             'poses': records, 'calobject_warp': np.asarray(inputs.get('calobject_warp', [0., 0.])).tolist()}
@@ -274,17 +312,26 @@ def calibrate(args):
     output.mkdir()
     report = {'status': 'in_progress', 'mrcal_version': str(getattr(mrcal, '__version__', 'distro-package-see-dpkg')),
               'source_session': str(session), 'robot_mount_calibrated': False, 'issues': [], 'warnings': [],
-              'models': {}, 'synthetic_accuracy_claim': False}
+              'models': {}, 'synthetic_accuracy_claim': False,
+              'validation_basis': getattr(args, 'validation_basis', 'time_blocks')}
     try:
         views, corner_info = final_observations(session, data, args.corner_detector, output, args.timeout)
         report.update(corner_detection=corner_info, accepted_views=len(views))
         if len(views) < args.min_views:
             raise ValueError(f'Only {len(views)} final usable views; require {args.min_views}. Capture diverse sharp views.')
         report['image_sha256'] = {v['image']: hashlib.sha256((session / v['image']).read_bytes()).hexdigest() for v in views}
-        train, held = split_views(views)
+        basis = report['validation_basis']
+        train, held = split_views(views, validation_basis=basis)
         report['validation'] = {'training_images': [views[i]['image'] for i in train],
                                 'held_out_images': [views[i]['image'] for i in held],
-                                'method': 'deterministic 3-second-block holdout; not independent recapture'}
+                                'basis': basis,
+                                'method': ('deterministic 3-second-block holdout; not independent recapture'
+                                           if basis == 'time_blocks' else
+                                           'deterministic whole sequential image-group holdout; capture timing unknown; not independent recapture')}
+        if basis == 'image_groups':
+            report['validation']['group_size_images'] = IMAGE_GROUP_SIZE
+            report['warnings'].append(
+                'Sequential image groups do not establish temporal independence; capture timing and physical calibration accuracy remain unverified')
         coverage = np.zeros((6, 8), bool)
         for v in views:
             coverage |= grid_coverage(v['corners'], data['width'], data['height'])
@@ -339,7 +386,8 @@ def calibrate(args):
                 report['model_difference_error'] = str(exc)
                 report['issues'].append('Could not compare richer and runtime lens models')
         exported = export_opencv(mrcal, fitted['opencv8'], data)
-        exported.update(accepted_views=len(views), validation_rms_px=report['models']['opencv8']['holdout']['rms_px'])
+        exported.update(accepted_views=len(views), validation_rms_px=report['models']['opencv8']['holdout']['rms_px'],
+                        validation_basis=basis)
         report['status'] = 'needs_review' if report['issues'] else 'heuristics_passed_not_hardware_validated'
         exported['quality_status'] = report['status']
         filename = 'intrinsics.candidate.json' if report['issues'] else 'intrinsics.json'
@@ -364,6 +412,8 @@ def main(argv=None):
     parser.add_argument('--session', type=Path, required=True)
     from custom_vision.calibration_session import add_solve_arguments
     add_solve_arguments(parser)
+    parser.add_argument('--validation-basis', choices=('time_blocks', 'image_groups'), default='time_blocks',
+                        help='time_blocks requires source timestamps; image_groups makes no temporal-independence claim')
     args = parser.parse_args(argv)
     try:
         return calibrate(args)

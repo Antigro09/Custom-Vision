@@ -12,6 +12,7 @@ import numpy as np
 
 from .config import load_config
 from .camera import LatestFrameCapture
+from .camera_ownership import acquire_camera, LeasedCapture, physical_device
 from .dashboard import Dashboard
 from .publisher import Publisher
 from .revisions import geometry_revisions
@@ -25,7 +26,14 @@ def open_camera(settings):
     api={'auto':cv2.CAP_ANY,'v4l2':cv2.CAP_V4L2,'gstreamer':cv2.CAP_GSTREAMER}.get(backend)
     if api is None: raise ValueError(f'Unknown camera backend: {backend}')
     if backend=='auto' and (isinstance(source,int) or str(source).startswith('/dev/')): api=cv2.CAP_V4L2
-    cap=cv2.VideoCapture(source,api)
+    device=physical_device(source,backend)
+    lease=acquire_camera(device,'vision-runtime') if device else None
+    try:
+        cap=cv2.VideoCapture(source,api)
+    except Exception:
+        if lease: lease.release()
+        raise
+    if lease: cap=LeasedCapture(cap,lease)
     if not cap.isOpened():
         cap.release()
         raise RuntimeError(f'Camera unavailable: {source}. Check connection and PhotonVision ownership.')

@@ -146,11 +146,10 @@ class CalibrationJobs:
         with self.lock:
             if self._caps is None:
                 probes = []
-                env = self._environment()
                 for executable in (self.python, self.solver_python):
                     try:
                         completed = subprocess.run([executable, "-c", _PROBE], capture_output=True,
-                                                   text=True, timeout=5, env=env, check=False)
+                                                   text=True, timeout=5, env=self._environment(executable), check=False)
                         probes.append(json.loads(completed.stdout) if completed.returncode == 0 else {})
                     except (OSError, ValueError, subprocess.TimeoutExpired):
                         probes.append({})
@@ -175,13 +174,33 @@ class CalibrationJobs:
             return copy.deepcopy(self._caps)
 
     @staticmethod
-    def _environment():
+    def _environment(executable=None):
         env = dict(os.environ)
-        for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
             env[key] = "1"
         env["PYTHONUNBUFFERED"] = "1"
         env["CUDA_VISIBLE_DEVICES"] = ""
+        if executable:
+            env["PATH"] = str(Path(executable).parent) + os.pathsep + env.get("PATH", "")
         return env
+
+    def _validate_input(self, source):
+        kind, identifiers = source.get("kind"), source.get("asset_ids")
+        if kind not in ("images", "video") or not isinstance(identifiers, list) or not 1 <= len(identifiers) <= (100 if kind == "images" else 1):
+            raise ValueError("Input requires 1..100 image assets or one video asset")
+        for identifier in identifiers:
+            asset = self._read("assets", identifier, "asset.json")
+            if asset["kind"] != ("image" if kind == "images" else "video"):
+                raise ValueError("Asset kind does not match session input")
+        if len(set(identifiers)) != len(identifiers):
+            raise ValueError("Input asset IDs must be unique")
+        timestamps = source.get("timestamps_asset_id")
+        if timestamps is not None and self._read("assets", timestamps, "asset.json")["kind"] != "timestamps":
+            raise ValueError("Timestamp input must be a timestamps asset")
+        return {"kind": kind, "asset_ids": identifiers, "timestamps_asset_id": timestamps}
+
+    def _native_validation_basis(self, session):
+        return "time_blocks" if session["summary"]["timestamp_source"] == "recorded_host_read_complete" else None
 
     def add_asset(self, spec):
         spec = _object(spec, "asset")
@@ -268,19 +287,9 @@ class CalibrationJobs:
             _number(focus["value"], "focus.value", -1e6, 1e6)
         checked_mode["focus"] = {"kind": focus["kind"], "value": focus.get("value"),
                                  "locked": focus.get("locked", False)}
-        source = copy.deepcopy(_object(spec.get("input"), "input"))
+        source = self._validate_input(copy.deepcopy(_object(spec.get("input"), "input")))
         kind, identifiers = source.get("kind"), source.get("asset_ids")
-        if kind not in ("images", "video") or not isinstance(identifiers, list) or not 1 <= len(identifiers) <= (100 if kind == "images" else 1):
-            raise ValueError("Input requires 1..100 image assets or one video asset")
-        for identifier in identifiers:
-            asset = self._read("assets", identifier, "asset.json")
-            if asset["kind"] != ("image" if kind == "images" else "video"):
-                raise ValueError("Asset kind does not match session input")
-        if len(set(identifiers)) != len(identifiers):
-            raise ValueError("Input asset IDs must be unique")
         timestamps = source.get("timestamps_asset_id")
-        if timestamps is not None and self._read("assets", timestamps, "asset.json")["kind"] != "timestamps":
-            raise ValueError("Timestamp input must be a timestamps asset")
         selection = _object(spec.get("selection", {}), "selection")
         defaults = {"max_views": 180, "interval_s": .7, "novelty": .025,
                     "max_sharpness_px": 3., "min_contrast": 40., "max_frames": 10000}
@@ -308,7 +317,7 @@ class CalibrationJobs:
                       "camera": checked_camera, "mode": checked_mode,
                       "declared_mode": copy.deepcopy(checked_mode),
                       "mode_dimensions_source": "unknown" if checked_mode["width"] is None else "declared",
-                      "input": {"kind": kind, "asset_ids": identifiers, "timestamps_asset_id": timestamps},
+                      "input": source,
                       "selection": selection, "width": None, "height": None, "warnings": warnings,
                       "summary": {"accepted_views": 0, "processed_frames": 0, "rejected_views": 0,
                                   "coverage_fraction": 0., "coverage_grid": [[0] * 8 for _ in range(6)],
@@ -386,7 +395,8 @@ class CalibrationJobs:
             required = "opencv" if operation == "select" else solver
             if not caps["solvers"][required]["available"]:
                 reason = caps["solvers"][required].get("reason", "Configured OpenCV worker is unavailable")
-            if operation == "solve" and solver == "mrcal" and session["summary"]["timestamp_source"] != "recorded_host_read_complete":
+            validation_basis = self._native_validation_basis(session)
+            if operation == "solve" and solver == "mrcal" and validation_basis is None:
                 reason = "mrcal temporal validation requires an aligned recorded host timestamp sidecar; image order/FPS is not measured capture time"
             if operation == "solve" and solver == "mrcal" and options["corner_detector"] == "mrgingham" and not caps["tools"]["mrgingham_available"]:
                 reason = "Configured mrgingham command is unavailable"
@@ -403,7 +413,8 @@ class CalibrationJobs:
             if reason:
                 return copy.deepcopy(job)
             request = {"root": str(self.root), "job_id": identifier, "session": session,
-                       "operation": operation, "solver": solver, "options": options}
+                       "operation": operation, "solver": solver, "options": options,
+                       "validation_basis": validation_basis}
             for asset_id in session["input"]["asset_ids"] + ([session["input"]["timestamps_asset_id"]] if session["input"]["timestamps_asset_id"] else []):
                 asset = self._read("assets", asset_id, "asset.json")
                 request.setdefault("assets", {})[asset_id] = str(self._safe(self._directory("assets", asset_id) / asset["stored_file"]))
@@ -444,7 +455,7 @@ class CalibrationJobs:
             interpreter = self.solver_python if job["operation"] == "solve" and job["solver"] == "mrcal" else self.python
             argv = [interpreter, "-m", "custom_vision.calibration_browser_worker", "--request", str(directory / "request.json")]
             with (directory / "worker.log").open("w") as log:
-                process = self.adapter.start(argv, cwd=str(Path(__file__).resolve().parents[1]), log=log, env=self._environment())
+                process = self.adapter.start(argv, cwd=str(Path(__file__).resolve().parents[1]), log=log, env=self._environment(interpreter))
                 with self.lock:
                     self._process = process
                 deadline = time.monotonic() + job["options"]["timeout_s"]
@@ -547,6 +558,7 @@ class CalibrationJobs:
                 raise ValueError("Session has no saved selection yet")
             directory = self._safe(self.root / session["selected_directory"])
             allowed = {view["image"] for view in session["views"]}
+            allowed.update(view["overlay"] for view in session["views"] if view.get("overlay"))
             if session["summary"].get("preview_artifact"):
                 allowed.add(session["summary"]["preview_artifact"])
             return self._artifact(directory, allowed, name)

@@ -13,7 +13,7 @@ import re
 import secrets
 import threading
 import time
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from .device_controls import discover_devices
 
@@ -27,6 +27,8 @@ _STATIC_FILES = {"/": ("index.html", "text/html; charset=utf-8"),
                  "/static/field_dashboard.js": ("field_dashboard.js", "text/javascript; charset=utf-8"),
                  "/static/field.css": ("field.css", "text/css; charset=utf-8"),
                  "/static/calibration_dashboard.js": ("calibration_dashboard.js", "text/javascript; charset=utf-8"),
+                 "/static/calibration_capture_ui.js": ("calibration_capture_ui.js", "text/javascript; charset=utf-8"),
+                 "/static/calibration_diagnostics.js": ("calibration_diagnostics.js", "text/javascript; charset=utf-8"),
                  "/static/calibration.css": ("calibration.css", "text/css; charset=utf-8")}
 _MAX_BODY = 1024 * 1024
 _NAME = re.compile(r"[\w-]+$")
@@ -44,7 +46,7 @@ class Dashboard:
         self.preview_stats = {}
         self.config = dict(config)
         self.controller = controller
-        # Only the separate offline desktop application supplies this manager.
+        # Only the separate calibration desktop application supplies this manager.
         # Normal vision runtime starts no calibration processes or dependency probes.
         self.calibration_jobs = calibration_jobs
         self._pending = {}
@@ -87,7 +89,8 @@ class Dashboard:
                 self.send_body(status, json.dumps(value, allow_nan=False).encode())
 
             def do_GET(self):
-                path = urlsplit(self.path).path
+                target = urlsplit(self.path)
+                path = target.path
                 try:
                     if path == "/api/status":
                         with owner.lock:
@@ -96,7 +99,7 @@ class Dashboard:
                     elif path == "/api/field-view":
                         self.send_json(owner.field_view())
                     elif path.startswith("/api/calibration/"):
-                        result = owner.calibration_get(path)
+                        result = owner.calibration_get(path, target.query)
                         if isinstance(result, dict) and "body" in result:
                             self.send_body(200, result["body"], result["content_type"], result["file_name"])
                         else:
@@ -139,6 +142,8 @@ class Dashboard:
                         self.send_json({"error": "Not found"}, 404)
                 except (ValueError, TypeError, KeyError) as exc:
                     self.send_json({"error": str(exc)}, 400)
+                except RuntimeError as exc:
+                    self.send_json({"error": str(exc)}, 409)
                 except Exception as exc:
                     self.send_json({"error": str(exc)}, 500)
 
@@ -229,7 +234,7 @@ class Dashboard:
         self.thread.start()
         self.encoder_thread.start()
 
-    def calibration_get(self, path):
+    def calibration_get(self, path, query=""):
         manager = self.calibration_jobs
         active = self.controller is not None and getattr(self.controller, "writable", True)
         if path == "/api/calibration/capabilities":
@@ -238,8 +243,37 @@ class Dashboard:
                 "reason": "Start the separate offline calibration desktop application."}
             return {**data, "runtime_activation": bool(manager and active),
                     "desktop_mode": bool(self.config.get("calibration_only"))}
+        if path == "/api/calibration/status":
+            status_method = getattr(self.controller, "calibration_status", None)
+            pipelines = status_method() if callable(status_method) else []
+            return {"runtime_activation_available": bool(manager and active),
+                    "pipelines": pipelines,
+                    "latest_candidates": manager.list_candidates() if manager else [],
+                    "default_state": "runtime_camera_states" if pipelines else "offline_no_runtime"}
         if manager is None:
             raise ValueError("Offline calibration application is not running")
+        if path == "/api/calibration/capture/sources": return manager.capture_sources()
+        if path == "/api/calibration/capture/status": return manager.capture_status()
+        match = re.fullmatch(r"/api/calibration/capture/([^/]+)/frame", path)
+        if match:
+            values = parse_qs(query, keep_blank_values=True)
+            if set(values) - {"frame_id"} or len(values.get("frame_id", [])) > 1:
+                raise ValueError("Preview accepts one optional exact frame_id")
+            frame_id = None
+            if "frame_id" in values:
+                value = values["frame_id"][0]
+                if not re.fullmatch(r"0|[1-9][0-9]{0,15}", value):
+                    raise ValueError("Preview frame_id must be a nonnegative integer")
+                frame_id = int(value)
+                if frame_id > 2**53 - 1:
+                    raise ValueError("Preview frame_id exceeds the exact integer bound")
+            return manager.capture_frame(unquote(match[1]), frame_id=frame_id)
+        match = re.fullmatch(r"/api/calibration/sessions/([^/]+)/(snapshots|mosaic)", path)
+        if match:
+            method = manager.snapshots if match[2] == "snapshots" else manager.mosaic
+            return method(unquote(match[1]))
+        match = re.fullmatch(r"/api/calibration/candidates/([^/]+)/diagnostics", path)
+        if match: return manager.diagnostics(unquote(match[1]))
         if path == "/api/calibration/sessions": return manager.list_sessions()
         if path == "/api/calibration/jobs": return manager.list_jobs()
         if path == "/api/calibration/candidates": return manager.list_candidates()
@@ -262,6 +296,12 @@ class Dashboard:
         if path == "/api/calibration/assets": return manager.add_asset(data)
         if path == "/api/calibration/sessions": return manager.create_session(data)
         if path == "/api/calibration/jobs": return manager.create_job(data)
+        if path == "/api/calibration/capture/start": return manager.capture_start(data)
+        if path == "/api/calibration/capture/snapshot": return manager.capture_snapshot(data)
+        if path == "/api/calibration/capture/stop": return manager.capture_stop(data)
+        if path == "/api/calibration/candidates/import": return manager.import_candidate(data)
+        match = re.fullmatch(r"/api/calibration/candidates/([^/]+)/review", path)
+        if match: return manager.review(unquote(match[1]), data)
         match = re.fullmatch(r"/api/calibration/jobs/([^/]+)/cancel", path)
         if match: return manager.cancel_job(unquote(match[1]))
         active = self.controller is not None and getattr(self.controller, "writable", True)
@@ -273,10 +313,16 @@ class Dashboard:
             if not isinstance(data.get("pipeline"), str) or not _NAME.fullmatch(data["pipeline"]):
                 raise ValueError("A valid pipeline name is required")
             candidate_id = unquote(match[1])
-            candidate = manager.get_candidate(candidate_id)
-            session = manager.get_session(candidate["session_id"])
-            metadata = {"camera": session.get("camera", session.get("spec", {}).get("camera")),
-                        "mode": session.get("mode", session.get("spec", {}).get("mode"))}
+            metadata_method = getattr(manager, "candidate_metadata", None)
+            if callable(metadata_method):
+                metadata = metadata_method(candidate_id)
+            else:
+                # Legacy offline adapters retain their metadata format; the
+                # runtime controller independently enforces its review gates.
+                candidate = manager.get_candidate(candidate_id)
+                session = manager.get_session(candidate["session_id"])
+                metadata = {"camera": session.get("camera", session.get("spec", {}).get("camera")),
+                            "mode": session.get("mode", session.get("spec", {}).get("mode"))}
             return self.controller.activate_calibration_candidate(data["pipeline"], manager.candidate_data(candidate_id), metadata)
         match = re.fullmatch(r"/api/calibration/activations/([^/]+)/restore", path)
         if match: return self.controller.restore_calibration_activation(unquote(match[1]))

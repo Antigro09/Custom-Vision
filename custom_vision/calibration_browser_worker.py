@@ -213,12 +213,16 @@ def solve(request, root, job_dir):
         write_json(output / "intrinsics.candidate.json", calibration)
         write_json(output / "report.json", report)
     else:
-        if record["summary"]["timestamp_source"] != "recorded_host_read_complete":
+        basis = request.get("validation_basis", "time_blocks")
+        if basis not in ("time_blocks", "image_groups"):
+            raise ValueError("Unsupported native validation basis")
+        if basis == "time_blocks" and record["summary"]["timestamp_source"] not in ("recorded_host_read_complete", "host_frame_read_complete"):
             raise ValueError("Native temporal validation requires recorded host-time provenance")
         from .calibration_solver import calibrate
         args = SimpleNamespace(session=session_path, min_views=options["min_views"], fov_deg=options["fov_deg"],
                                corner_detector=options["corner_detector"], no_spline=options["no_spline"],
-                               max_validation_rms=options["max_validation_rms"], timeout=options["timeout_s"])
+                               max_validation_rms=options["max_validation_rms"], timeout=options["timeout_s"],
+                               validation_basis=basis)
         code = calibrate(args)
         if code not in (0, 2):
             raise RuntimeError("Native solver did not produce a reviewable candidate")
@@ -227,6 +231,14 @@ def solve(request, root, job_dir):
         report = json.loads((output / "report.json").read_text())
         calibration = json.loads((output / report["intrinsics_file"]).read_text())
         report.pop("source_session", None)
+    provenance = {"source_kind": record.get("source_kind", record["input"]["kind"]),
+                  "synthetic": record.get("source_kind") == "synthetic", "camera": record["camera"],
+                  "mode": record["mode"], "capture_revision": record.get("capture_revision")}
+    calibration.update(source_kind=provenance["source_kind"], synthetic=provenance["synthetic"],
+                       calibration_provenance=provenance)
+    report.update(source_kind=provenance["source_kind"], synthetic=provenance["synthetic"])
+    write_json(output / report.get("intrinsics_file", "intrinsics.candidate.json"), calibration)
+    write_json(output / "report.json", report)
     _check_cancel()
     candidate_id = uuid.uuid4().hex
     candidate_dir = root / "candidates" / candidate_id
@@ -241,6 +253,9 @@ def solve(request, root, job_dir):
                  "quality_status": report["status"], "camera": record["camera"], "mode": record["mode"],
                  "declared_mode": record["declared_mode"], "mode_dimensions_source": record["mode_dimensions_source"],
                  "calibration": calibration, "report": report, "artifacts": artifacts,
+                 "capture_revision": record.get("capture_revision"),
+                 "source_kind": record.get("source_kind", record["input"]["kind"]),
+                 "synthetic": record.get("source_kind") == "synthetic",
                  "directory": str(output.relative_to(root))}
     write_json(candidate_dir / "candidate.json", candidate)
     progress = _progress(job_dir, "candidate_ready", accepted=count)
@@ -252,7 +267,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request", type=Path, required=True)
     args = parser.parse_args(argv)
-    cv2.setNumThreads(1)
+    cv2.setNumThreads(0)
     _CANCELED.clear()
     signal.signal(signal.SIGTERM, lambda *_: _CANCELED.set())
     signal.signal(signal.SIGINT, lambda *_: _CANCELED.set())

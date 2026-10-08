@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Bound the camera-free native calibration integration check on macOS.
 
-Each run owns a fresh process group and artifact directory. No external process
-is signaled. RSS is sampled, not a kernel-enforced memory limit or an exact peak.
+Each run owns a fresh process group and its observed descendant process groups,
+including workers that start separate sessions. No unrelated group is signaled.
+RSS is sampled, not a kernel-enforced memory limit or an exact peak. A new session
+whose spawning ancestry disappears between snapshots can be missed, even if an
+orphan remains alive; this is observed descendant cleanup, not kernel isolation.
 """
 from __future__ import annotations
 
@@ -25,17 +28,78 @@ GIB = 1024 ** 3
 ARTIFACT_LIMIT = 256 * 1024 ** 2
 
 
-def process_group(pgid):
-    result = subprocess.run(['/bin/ps', '-axo', 'pid=,ppid=,pgid=,rss=,stat=,comm='],
+def process_table():
+    result = subprocess.run(['/bin/ps', '-axo', 'pid=,ppid=,pgid=,rss=,stat=,lstart=,comm='],
                             capture_output=True, text=True, check=True, timeout=5)
     members = []
     for line in result.stdout.splitlines():
-        fields = line.split(None, 5)
-        if len(fields) == 6 and int(fields[2]) == pgid:
+        fields = line.split(None, 10)
+        if len(fields) == 11:
             members.append(dict(pid=int(fields[0]), ppid=int(fields[1]),
+                                pgid=int(fields[2]), started=' '.join(fields[5:10]),
                                 rss_bytes=int(fields[3]) * 1024,
-                                state=fields[4], command=fields[5]))
+                                state=fields[4], command=fields[10]))
+    if not members:
+        raise subprocess.SubprocessError('Process table contained no parsable rows')
     return members
+
+
+def process_group(pgid):
+    return [member for member in process_table() if member['pgid'] == pgid]
+
+
+class OwnedProcessGroups:
+    """Discover groups by observed ancestry, then retain them across reparenting.
+
+    Matching observed process start strings avoids using a reused PID as an
+    ancestry anchor. An empty group is retired and cannot become owned again
+    without new descendant ancestry. Existing members of an established group
+    remain owned when its original leader exits; outsiders cannot join a process
+    group in another session. No process-name or arbitrary parent-PID matching is
+    used. Sampling cannot establish ownership of a new session whose spawning
+    ancestry disappears before it is observed, even if that orphan persists.
+    """
+    def __init__(self, child_pid):
+        self.root_pid = child_pid
+        self.supervisor_pgid = os.getpgrp()
+        if child_pid == self.supervisor_pgid:
+            raise ValueError('The launched child must have its own process group')
+        self.active_groups = {child_pid}
+        self.seen_groups = {child_pid}
+        self.identities = {}
+        self.seen_pids = set()
+
+    def sample(self, *, direct_child_reaped=False):
+        table = process_table()
+        rows = {row['pid']: row for row in table}
+        owned = {pid for pid, started in self.identities.items()
+                 if pid in rows and rows[pid]['started'] == started}
+        # The unreaped direct PID cannot be reused; bind its first observed start.
+        if not direct_child_reaped and self.root_pid in rows and self.root_pid not in self.identities:
+            owned.add(self.root_pid)
+        groups = set(self.active_groups)
+        # Do not retain a group ID if its former leader PID has visibly been reused.
+        for pgid in list(groups):
+            if (pgid in rows and pgid in self.identities
+                    and rows[pgid]['started'] != self.identities[pgid]):
+                groups.remove(pgid)
+        while True:
+            before = (len(owned), len(groups))
+            for row in table:
+                if row['pgid'] == self.supervisor_pgid:
+                    continue
+                if row['pid'] in owned or row['ppid'] in owned or row['pgid'] in groups:
+                    owned.add(row['pid'])
+                    groups.add(row['pgid'])
+            if before == (len(owned), len(groups)):
+                break
+        members = [row for row in table if row['pid'] in owned and row['pgid'] != self.supervisor_pgid]
+        self.active_groups = {row['pgid'] for row in members}
+        self.seen_groups.update(self.active_groups)
+        for row in members:
+            self.identities[row['pid']] = row['started']
+            self.seen_pids.add(row['pid'])
+        return members
 
 
 def available_memory():
@@ -56,17 +120,18 @@ def save(path, value):
 
 
 def supervise(command, environment, directory, deadline, grace=5):
-    """Return a report after reaping the direct child and checking its group."""
+    """Reap the direct child and check all observed, owned descendant groups."""
     started = time.monotonic()
     report = dict(command=command, wall_deadline_seconds=deadline,
                   term_grace_seconds=grace, sampled_peak_group_rss_bytes=0,
                   sampled_peak_artifact_bytes=0, seen_pids=[], signals=[],
                   rss_limit_bytes=2 * GIB, artifact_limit_bytes=ARTIFACT_LIMIT,
-                  rss_measurement='sampled aggregate of owned process group; peak may be missed')
+                  rss_measurement='sampled aggregate of launched process group and observed descendant groups; peak or unobserved ancestry may be missed',
+                  sampling_interval_seconds=.1, signal_targets=[])
     child = None
+    ownership = None
     usage = None
     reaped = False
-    seen = set()
     cancelled = False
 
     def cancel(signum, _frame):
@@ -83,13 +148,28 @@ def supervise(command, environment, directory, deadline, grace=5):
                 usage = observed_usage
                 child.returncode = os.waitstatus_to_exitcode(status)
 
-    def send(signum):
-        # start_new_session creates this group; we never signal other groups.
-        try:
-            os.killpg(child.pid, signum)
-            report['signals'].append(signal.Signals(signum).name)
-        except ProcessLookupError:
-            pass
+    def send(signum, groups=None):
+        # Groups are created by the launched child or established by observed
+        # descendant ancestry. Always exclude the supervisor's own group.
+        for pgid in sorted(ownership.active_groups if groups is None else groups, reverse=True):
+            if pgid == ownership.supervisor_pgid or pgid not in ownership.seen_groups:
+                raise ValueError('Refusing to signal a group without owned descendant provenance')
+            try:
+                os.killpg(pgid, signum)
+                name = signal.Signals(signum).name
+                report['signals'].append(name)
+                report['signal_targets'].append(dict(pgid=pgid, signal=name))
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                report.setdefault('cleanup_signal_errors', []).append(f'{type(exc).__name__}: {exc}')
+
+    def record_sample(members):
+        rss = sum(m['rss_bytes'] for m in members)
+        size = artifact_bytes(directory)
+        report['sampled_peak_group_rss_bytes'] = max(report['sampled_peak_group_rss_bytes'], rss)
+        report['sampled_peak_artifact_bytes'] = max(report['sampled_peak_artifact_bytes'], size)
+        return rss, size
 
     previous = {s: signal.signal(s, cancel) for s in (signal.SIGINT, signal.SIGTERM)}
     try:
@@ -97,16 +177,13 @@ def supervise(command, environment, directory, deadline, grace=5):
             child = subprocess.Popen(command, cwd=ROOT, env=environment,
                                      stdout=output, stderr=subprocess.STDOUT,
                                      start_new_session=True)
+            ownership = OwnedProcessGroups(child.pid)
             report['pid'] = report['pgid'] = child.pid
             save(directory / 'run-start.json', report)
             print(f'Owned native process group {child.pid}; artifacts {directory}', flush=True)
             while True:
-                members = process_group(child.pid)
-                seen.update(m['pid'] for m in members)
-                rss = sum(m['rss_bytes'] for m in members)
-                size = artifact_bytes(directory)
-                report['sampled_peak_group_rss_bytes'] = max(report['sampled_peak_group_rss_bytes'], rss)
-                report['sampled_peak_artifact_bytes'] = max(report['sampled_peak_artifact_bytes'], size)
+                members = ownership.sample(direct_child_reaped=reaped)
+                rss, size = record_sample(members)
                 reap()
                 if reaped:
                     report['stop_reason'] = 'child_completed'
@@ -118,16 +195,18 @@ def supervise(command, environment, directory, deadline, grace=5):
                 if reason:
                     report['stop_reason'] = reason
                     break
-                time.sleep(.5)
+                time.sleep(.1)
     except BaseException as exc:
         report['stop_reason'] = 'supervisor_error'
         report['error'] = f'{type(exc).__name__}: {exc}'
     finally:
-        if child is not None:
+        if child is not None and ownership is not None:
             # Also clean up descendants after an early pytest/per-fit failure.
             def monitor_cleanup():
                 try:
-                    return process_group(child.pid)
+                    observed = ownership.sample(direct_child_reaped=reaped)
+                    record_sample(observed)
+                    return observed
                 except (subprocess.SubprocessError, OSError) as exc:
                     report.setdefault('cleanup_monitor_errors', []).append(f'{type(exc).__name__}: {exc}')
                     return None
@@ -136,24 +215,26 @@ def supervise(command, environment, directory, deadline, grace=5):
             # A failed monitor cannot prevent signaling our known, owned group.
             if members or members is None or not reaped:
                 send(signal.SIGTERM)
+                term_groups = set(ownership.active_groups)
                 end = time.monotonic() + grace
                 while time.monotonic() < end:
                     reap()
                     members = monitor_cleanup()
+                    newly_owned = ownership.active_groups - term_groups
+                    if newly_owned:
+                        send(signal.SIGTERM, newly_owned)
+                        term_groups.update(newly_owned)
                     if members == []:
                         break
                     time.sleep(.1)
                 members = monitor_cleanup()
                 if members or members is None:
                     send(signal.SIGKILL)
-            if not reaped:
-                _, status, usage = os.wait4(child.pid, 0)
-                reaped = True
-                child.returncode = os.waitstatus_to_exitcode(status)
             # Allow the OS to reap orphaned descendants, while retaining evidence.
             for _ in range(50):
+                reap()
                 leftovers = monitor_cleanup()
-                if leftovers == [] or leftovers is None:
+                if reaped and (leftovers == [] or leftovers is None):
                     break
                 time.sleep(.1)
             report.update(exit_code=child.returncode, direct_child_reaped=reaped,
@@ -161,7 +242,11 @@ def supervise(command, environment, directory, deadline, grace=5):
         for signum, handler in previous.items():
             signal.signal(signum, handler)
         report['wall_seconds'] = time.monotonic() - started
-        report['seen_pids'] = sorted(seen)
+        report['seen_pids'] = sorted(ownership.seen_pids) if ownership else []
+        report['seen_pgids'] = sorted(ownership.seen_groups) if ownership else []
+        report['remaining_owned_pgids'] = sorted(ownership.active_groups) if ownership else []
+        report['sampled_peak_owned_rss_bytes'] = report['sampled_peak_group_rss_bytes']
+        report['descendant_scope'] = 'launched pytest plus ancestry-observed descendant process groups retained across reparenting; sessions whose spawning ancestry disappears between snapshots can be missed even if an orphan persists'
         if usage is not None:
             report.update(user_cpu_seconds=usage.ru_utime, system_cpu_seconds=usage.ru_stime,
                           wait4_maxrss_bytes=usage.ru_maxrss,
@@ -176,6 +261,7 @@ def main():
     parser.add_argument('--python', type=Path, default=ROOT / 'data/native-mrcal-mac-env/bin/python')
     parser.add_argument('--deadline', type=float, default=1800)
     parser.add_argument('--self-test', action='store_true', help='only short sleeping-process cleanup checks')
+    parser.add_argument('--guided', action='store_true', help='exercise the explicit guided capture worker and image-group validation')
     args = parser.parse_args()
     if sys.platform != 'darwin':
         parser.error('resource units and memory preflight require macOS')
@@ -210,6 +296,27 @@ def main():
             report = supervise([str(args.python), '-c', code], environment, case, deadline, grace=.5)
             assert report['direct_child_reaped'] and not report['remaining_group_members'], report
             assert report['signals'] and report['stop_reason'] == ('wall_deadline' if suffix else 'child_completed')
+        # Match the real job adapter: a worker starts a new session. Make its
+        # grandchild start a third session too, then retain both after reparenting.
+        grandchild_code = 'import os,time; print("nested grandchild",os.getpid(),os.getpgrp(),flush=True); time.sleep(60)'
+        worker_code = ('import os,subprocess,sys,time; '
+                       'print("nested worker",os.getpid(),os.getpgrp(),flush=True); '
+                       'subprocess.Popen([sys.executable,"-c",' + repr(grandchild_code) + '],start_new_session=True); '
+                       'time.sleep(60)')
+        for name, lifetime, deadline in (('nested_deadline', 60, .8), ('nested_early_exit', .6, 10)):
+            case = directory / name
+            case.mkdir()
+            nested_code = ('import subprocess,sys,time; '
+                           'subprocess.Popen([sys.executable,"-c",' + repr(worker_code) + '],start_new_session=True); '
+                           f'time.sleep({lifetime})')
+            report = supervise([str(args.python), '-c', nested_code], environment, case, deadline, grace=.5)
+            assert report['direct_child_reaped'] and report['remaining_group_members'] == [], report
+            assert len(report['seen_pgids']) >= 3 and len(report['seen_pids']) >= 3, report
+            assert report['remaining_owned_pgids'] == [] and report['sampled_peak_owned_rss_bytes'] > 0, report
+            assert report['stop_reason'] == ('wall_deadline' if lifetime == 60 else 'child_completed'), report
+            assert os.getpgrp() not in report['seen_pgids'], report
+            assert all(target['pgid'] in report['seen_pgids'] and target['pgid'] != os.getpgrp()
+                       for target in report['signal_targets']), report
         import threading
         case = directory / 'cancellation'
         case.mkdir()
@@ -223,30 +330,33 @@ def main():
         assert report['remaining_group_members'] == []
         case = directory / 'monitor_failure'
         case.mkdir()
-        original_monitor = globals()['process_group']
+        original_monitor = globals()['process_table']
         calls = 0
-        def fail_first_monitor(pgid):
+        def fail_first_monitor():
             nonlocal calls
             calls += 1
             if calls == 1:
                 raise subprocess.TimeoutExpired('injected ps failure', 5)
-            return original_monitor(pgid)
-        globals()['process_group'] = fail_first_monitor
+            return original_monitor()
+        globals()['process_table'] = fail_first_monitor
         try:
             report = supervise([str(args.python), '-c', code + 'time.sleep(60)'], environment, case, 10, grace=.5)
         finally:
-            globals()['process_group'] = original_monitor
+            globals()['process_table'] = original_monitor
         assert report['stop_reason'] == 'supervisor_error' and report['direct_child_reaped']
         assert report['remaining_group_members'] == [] and report['signals']
-        print(f'PASS: deadline, early-exit, cancellation and monitor-error cleanup; {directory}', flush=True)
+        print(f'PASS: deadline, early-exit, nested-session deadline/early-exit, cancellation and monitor-error cleanup; {directory}', flush=True)
         return 0
+    if args.guided:
+        environment['CUSTOM_VISION_GUIDED_NATIVE'] = '1'
+    selected_test = 'tests/test_calibration_guided_native.py::test_guided_native_worker_retains_exact_diagnostics_and_provenance' if args.guided else TEST
     code = ("import cv2,mrcal,scipy.optimize,pytest,json; from threadpoolctl import threadpool_info; "
             "cv2.setNumThreads(0); cv2.ocl.setUseOpenCL(False); assert cv2.getNumThreads()==1; "
             "print(json.dumps({'opencv_threads':cv2.getNumThreads(),'opencl':cv2.ocl.useOpenCL(),"
             "'pools':threadpool_info()}),flush=True); raise SystemExit(pytest.main(" +
             repr(['-q', '-rs', '-s', '--basetemp=' + str(directory / 'pytest-tmp'),
                   '-o', 'cache_dir=' + str(directory / 'pytest-cache'),
-                  '--junitxml=' + str(directory / 'junit.xml'), TEST]) + '))')
+                  '--junitxml=' + str(directory / 'junit.xml'), selected_test]) + '))')
     report = supervise([str(args.python), '-c', code], environment, directory, args.deadline)
     try:
         cases = ET.parse(directory / 'junit.xml').getroot().findall('.//testcase')
@@ -268,6 +378,7 @@ def main():
     return 0 if (report.get('exit_code') == 0 and report.get('stop_reason') == 'child_completed'
                  and report.get('remaining_group_members') == []
                  and not report.get('cleanup_monitor_errors')
+                 and not report.get('cleanup_signal_errors')
                  and report.get('native_test_passed')) else 1
 
 
