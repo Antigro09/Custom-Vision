@@ -1,0 +1,3 @@
+# Optional desktop-only browser QA; not a Jetson runtime dependency.
+# Use an already installed local Chromium executable with --chromium.
+playwright==1.63.0

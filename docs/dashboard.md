@@ -6,6 +6,10 @@ is needed on the Jetson. Existing PhotonVision commonly uses port 5800, so this
 project defaults to 5801. NetworkTables is a separate connection to the robot.
 The UI is implemented locally, with no CDN or internet requirement.
 
+The dashboard also includes [2D and 3D field visualization](FIELD_VISUALIZATION.md)
+with separate camera/robot vision estimates, receipt expiry, local reviewed-map
+imports and explicitly labeled replay.
+
 Select the camera pipeline, adjust settings, then **Save & apply settings**. The
 runtime validates the proposed configuration and reports whether a restart is
 required. Capture changes can briefly interrupt frames. The UI reports failures;
@@ -145,6 +149,7 @@ it does not launch a local desktop or display window.
 ## Local HTTP interface
 
 - `GET /api/status`: latest results keyed by pipeline name (read-only).
+- `GET /api/field-view`: unchanged results plus receipt ages and public field geometry (read-only).
 - `GET /api/config`: `{config, csrf_token, writable}`.
 - `GET /api/devices`: real device inventory with modes and controls.
 - `GET /frame/<pipeline>`: latest JPEG; HTTP 404 if disconnected or unavailable.
@@ -161,7 +166,7 @@ of that token, the browser fetches a fresh token and retries once without losing
 the form edits. It does not replay writes after an uncertain network failure. Keep the
 service on a trusted robot / development LAN rather than exposing it publicly.
 Upload filenames are chosen by the runtime controller, not the request. The
-server exposes only three fixed static assets and validated pipeline frame names.
+server exposes fixed allowlisted static assets and validated pipeline frame names.
 
 A dashboard instantiated without a controller remains read-only for compatibility
 with diagnostics and tests. The `Dashboard.set_renderer(callback)` hook receives

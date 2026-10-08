@@ -20,7 +20,12 @@ from .device_controls import discover_devices
 _STATIC = Path(__file__).with_name("static")
 _STATIC_FILES = {"/": ("index.html", "text/html; charset=utf-8"),
                  "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
-                 "/static/style.css": ("style.css", "text/css; charset=utf-8")}
+                 "/static/style.css": ("style.css", "text/css; charset=utf-8"),
+                 "/static/field_model.js": ("field_model.js", "text/javascript; charset=utf-8"),
+                 "/static/field_renderer.js": ("field_renderer.js", "text/javascript; charset=utf-8"),
+                 "/static/field_scene.js": ("field_scene.js", "text/javascript; charset=utf-8"),
+                 "/static/field_dashboard.js": ("field_dashboard.js", "text/javascript; charset=utf-8"),
+                 "/static/field.css": ("field.css", "text/css; charset=utf-8")}
 _MAX_BODY = 1024 * 1024
 _NAME = re.compile(r"[\w-]+$")
 
@@ -30,6 +35,9 @@ class Dashboard:
         self.lock = threading.Lock()
         self.condition = threading.Condition(self.lock)
         self.results = {}
+        self._received_at = {}
+        self._field_layout = None
+        self._mounts = {}
         self.images = {}
         self.preview_stats = {}
         self.config = dict(config)
@@ -75,10 +83,12 @@ class Dashboard:
                         with owner.lock:
                             data = dict(owner.results)
                         self.send_json(data)
+                    elif path == "/api/field-view":
+                        self.send_json(owner.field_view())
                     elif path == "/api/config":
                         data = owner.controller.get_config() if owner.controller else {"dashboard": owner.config}
                         self.send_json({"config": data, "csrf_token": owner._csrf,
-                                        "writable": owner.controller is not None})
+                                        "writable": owner.controller is not None and getattr(owner.controller, "writable", True)})
                     elif path == "/api/devices":
                         # UVC enumeration is slow; cache for two seconds and keep it
                         # away from the inference thread and preview lock.
@@ -115,7 +125,7 @@ class Dashboard:
                 if path not in {"/api/config", "/api/calibration", "/api/field-layout"}:
                     self.send_json({"error": "Not found"}, 404)
                     return
-                if not owner.controller:
+                if not owner.controller or not getattr(owner.controller, "writable", True):
                     self.send_json({"error": "Dashboard is read-only without a runtime controller"}, 405)
                     return
                 origin = self.headers.get("Origin")
@@ -186,6 +196,40 @@ class Dashboard:
         with self.lock:
             self._renderer = callback
 
+    def set_field_geometry(self, layout, mounts_by_pipeline):
+        """Cache public geometry once; no files or inference on field-view reads.
+
+        Validation copies allowlisted WPILib layout/mount fields, preserving the
+        supplied fixed origin. A missing mount remains null, never identity.
+        """
+        from .localization import validate_field_layout, validate_robot_to_camera
+        checked_layout = None if layout is None else validate_field_layout(layout)
+        if not isinstance(mounts_by_pipeline, dict):
+            raise ValueError("Field-view mounts must be a pipeline mapping")
+        checked_mounts = {}
+        for name, mount in mounts_by_pipeline.items():
+            if not isinstance(name, str) or not _NAME.fullmatch(name):
+                raise ValueError("Field-view mount needs a valid pipeline name")
+            checked_mounts[name] = validate_robot_to_camera(mount)
+        with self.lock:
+            self._field_layout = checked_layout
+            self._mounts = checked_mounts
+
+    def field_view(self):
+        """Return coherent results and host receipt ages without altering packets.
+
+        Receipt age describes dashboard liveness, not synchronized capture age.
+        Repeated HTTP polls do not reset it; invalidations are fresh receipts too.
+        """
+        with self.lock:
+            now = time.monotonic()
+            results = dict(self.results)
+            ages = {name: (max(0., (now - self._received_at[name]) * 1000)
+                           if name in self._received_at else None)
+                    for name in results}
+            return {"version": 1, "results": results, "receipt_age_ms": ages,
+                    "field_layout": self._field_layout, "mounts": self._mounts}
+
     def update(self, payload, frame=None):
         """O(1) handoff; caller must never mutate payload/frame after this call."""
         name = payload["pipeline"]
@@ -193,6 +237,7 @@ class Dashboard:
             if self._stopped:
                 return
             self.results[name] = payload
+            self._received_at[name] = time.monotonic()
             if not payload.get("connected", False):
                 self._epochs[name] += 1
                 self._pending.pop(name, None)

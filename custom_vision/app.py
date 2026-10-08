@@ -144,6 +144,8 @@ class Runtime:
             self.controller=RuntimeController(config_path,self.request_restart,validate_runtime)
         self.dashboard=Dashboard(config['dashboard'],controller=self.controller) if config['dashboard'].get('enabled') else None
         if self.dashboard:
+            self.dashboard.set_field_geometry(config.get('field_layout_data'),
+                                              {p['name']:p.get('robot_to_camera') for p in config['pipelines']})
             by_name={p['name']:p for p in config['pipelines']}
             def renderer(payload,frame):
                 from .overlay import annotate
