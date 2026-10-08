@@ -101,17 +101,14 @@ def transform(xyz, rpy=(0., 0., 0.)):
     return result
 
 
-def layout_for(tags):
-    entries = []
-    for tag_id, pose in tags.items():
-        rvec = cv2.Rodrigues(pose[:3, :3])[0].reshape(3)
-        angle = np.linalg.norm(rvec)
-        q = np.r_[math.cos(angle / 2), rvec * math.sin(angle / 2) / angle] if angle else [1, 0, 0, 0]
-        entries.append({"ID": tag_id, "pose": {
-            "translation": dict(zip(("x", "y", "z"), pose[:3, 3].tolist())),
-            "rotation": {"quaternion": dict(zip(("W", "X", "Y", "Z"), q))},
-        }})
-    return {"field": {"length": 16.5, "width": 8.2}, "tags": entries}
+def layout_for(name):
+    """Use literal public config inputs, independent of OpenCV/CPU roundoff.
+
+    Solver output still comes from real CPU geometry below. Configuration IDs
+    must identify these exact input bytes, not a newly computed quaternion.
+    """
+    layouts = json.loads((ROOT / "protocol" / "fixture-layouts.json").read_text())
+    return copy.deepcopy(layouts["layouts"][name])
 
 
 def project_scene(tags, camera, calibration):
@@ -157,7 +154,7 @@ def make_cases():
     tags = {1: transform([5., 3.3, 1.3], [0., 0., 180.]),
             2: transform([5.4, 4.4, .8], [0., 0., 200.]),
             3: transform([4.8, 2.6, .9], [0., 0., 160.])}
-    layout = layout_for(tags)
+    layout = layout_for("scene")
     cases = []
 
     def add(name, payload, expected, **metadata):
@@ -180,7 +177,7 @@ def make_cases():
     flat_cal = dict(CALIBRATION, dist_coeffs=[0.] * 5)
     flat_camera, flat_tags = transform([1., 2., 1.]), {7: transform([3., 2., 1.], [0., 0., 180.])}
     localized("ambiguous_tag", project_scene(flat_tags, flat_camera, flat_cal), calibration=flat_cal,
-              field=layout_for(flat_tags), expected={"localization_valid": False, "localization_reason": "ambiguous_pose", "tag_geometry_valid": True})
+              field=layout_for("ambiguous"), expected={"localization_valid": False, "localization_reason": "ambiguous_pose", "tag_geometry_valid": True})
 
     poi_settings = dict(enabled=True, calibration_verified=True,
                         targets=[dict(name="aim", tag_id=1, offset_m=[0., .2, .4])])
@@ -305,7 +302,8 @@ def generate(destination, contract_status="pending_runtime_alignment"):
     source_files = ("custom_vision/publisher.py", "custom_vision/app.py", "custom_vision/config.py", "custom_vision/camera.py",
                     "custom_vision/clock.py", "custom_vision/nt_clock.py",
                     "custom_vision/revisions.py", "custom_vision/localization.py", "custom_vision/object_geometry.py",
-                    "custom_vision/poi.py", "custom_vision/objects.py", "tools/generate_protocol_fixtures.py")
+                    "custom_vision/poi.py", "custom_vision/objects.py", "tools/generate_protocol_fixtures.py",
+                    "protocol/fixture-layouts.json")
     manifest = dict(manifest_version=1, contract_status=contract_status, profile=PROFILE,
                     producer_revision=revision,
                     producer_sources_sha256={name: sha256((ROOT / name).read_bytes()) for name in source_files if (ROOT / name).exists()},

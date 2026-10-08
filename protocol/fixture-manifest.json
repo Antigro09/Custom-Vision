@@ -14,7 +14,8 @@
     "custom_vision/object_geometry.py": "ae0f2010c3eb0eb61db79f0b60bc304e42559ef79a3a3c875321b531b1d2592f",
     "custom_vision/poi.py": "94ee0979826973d90000e0da19ef7e211d58664f51f13931420ffe991876fc46",
     "custom_vision/objects.py": "b1bc791c7ea25bc315dcef07a74c2185edef69930445668c60670f4c07c7fd8f",
-    "tools/generate_protocol_fixtures.py": "ec414a020ee7a126347288c7bf6ed04ac146afcebed1903426633565aec7df3d"
+    "tools/generate_protocol_fixtures.py": "0d6cd3b583de714f3472bae87c56977810950c30bedae9ff25c6f8f7cdba7dca",
+    "protocol/fixture-layouts.json": "1cc91544e7cc4bc54cc42aa3fbf3e3c6d5c248fbf00e08e3cec6b2fc1b6740e2"
   },
   "generation": {
     "command": ".venv/bin/python tools/generate_protocol_fixtures.py --contract-status matched_runtime",

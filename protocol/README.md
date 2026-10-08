@@ -32,7 +32,9 @@ Generate the golden corpus with:
 .venv/bin/python -m pytest tests/test_protocol.py
 ```
 
-The generator runs CPU geometry on small synthetic observations, injects an
+The generator reads literal synthetic layout configuration from
+[fixture-layouts.json](fixture-layouts.json), runs real CPU geometry on small
+synthetic observations, and injects an
 explicit microsecond clock, and sends results through the implemented
 `Publisher.publish -> wire_packet -> json.dumps` path with stub NT topics. It does
 not infer that physical calibration or capture correction is verified. A measured
@@ -58,3 +60,9 @@ WPILib 2026 + roboRIO is the primary current consumer target. A separately pinne
 WPILib 2027 alpha + Systemcore target requires its own API time adapter. An
 official WPILib 2026 + Systemcore toolchain must be verified separately; the
 offseason's game year does not establish support.
+
+Synthetic field-layout configuration is frozen so CPU/OpenCV roundoff cannot
+change its public configuration revision during regeneration. Geometry is still
+solved through the production code; golden strings remain exact and full-precision
+typed geometry comparisons allow tiny platform roundoff. These inputs are
+synthetic, with no surveyed field or measured physical calibration claim.
