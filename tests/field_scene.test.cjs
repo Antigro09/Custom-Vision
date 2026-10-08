@@ -46,6 +46,15 @@ test('canonical digest excludes only top approval, sorts keys, encodes f64 and n
   assert.throws(()=>scene.canonicalDigest({n:NaN}),/finite/);
 });
 
+test('recursive canonical keys use Unicode codepoint order rather than UTF-16 default sort',()=>{
+  const astral='\u{10000}',bmp='\uE000';
+  assert.deepEqual([bmp,astral].sort(),[astral,bmp]); // The native order is unsuitable.
+  const input={[astral]:2,[bmp]:1,nested:{[astral]:'astral',[bmp]:'bmp',aa:4,a:3}};
+  const expected=`{"nested":{"a":"f64:4008000000000000","aa":"f64:4010000000000000","${bmp}":"bmp","${astral}":"astral"},"${bmp}":"f64:3ff0000000000000","${astral}":"f64:4000000000000000"}`;
+  assert.equal(scene.canonicalDigest(input),crypto.createHash('sha256').update(expected,'utf8').digest('hex'));
+  assert.equal(scene.canonicalDigest(input),scene.canonicalDigest({nested:{a:3,aa:4,[bmp]:'bmp',[astral]:'astral'},[bmp]:1,[astral]:2}));
+});
+
 test('shared A* golden map and image match exact hashes, landmark projection and unchanged physical polygons',()=>{
   const directory=path.join(__dirname,'fixtures/field-map');
   const input=JSON.parse(fs.readFileSync(path.join(directory,'synthetic-approved.json'),'utf8'));

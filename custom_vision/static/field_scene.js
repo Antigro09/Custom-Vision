@@ -67,6 +67,18 @@
     return state.map(value => value.toString(16).padStart(8, '0')).join('');
   }
 
+  function codePointOrder(left, right) {
+    // JS default sort compares UTF-16 code units; the shared Python/Java
+    // contract compares Unicode codepoints, including supplementary planes.
+    let i=0,j=0;
+    while (i<left.length && j<right.length) {
+      const a=left.codePointAt(i),b=right.codePointAt(j);
+      if (a!==b) return a<b ? -1 : 1;
+      i+=a>0xffff ? 2 : 1; j+=b>0xffff ? 2 : 1;
+    }
+    return i<left.length ? 1 : j<right.length ? -1 : 0;
+  }
+
   function canonicalString(value, depth = 0) {
     if (depth > 24) fail('canonical content nesting is too deep');
     if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
@@ -78,7 +90,7 @@
     }
     if (Array.isArray(value)) return `[${value.map(item => canonicalString(item, depth + 1)).join(',')}]`;
     obj(value, 'canonical content');
-    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalString(value[key], depth + 1)}`).join(',')}}`;
+    return `{${Object.keys(value).sort(codePointOrder).map(key => `${JSON.stringify(key)}:${canonicalString(value[key], depth + 1)}`).join(',')}}`;
   }
 
   function canonicalDigest(map) {
