@@ -1,5 +1,9 @@
 # Guided Arducam calibration with mrcal
 
+For prerecorded media and a local browser setup/selection/review workspace, see
+[Offline calibration desktop workspace](CALIBRATION_BROWSER.md). It reuses this
+solver and reports unavailable native tooling explicitly.
+
 `calibration.py` is the new repository-root entry point. The existing
 `custom_vision/calibration.py` image-only OpenCV API is unchanged. The new tool
 captures video and selected images, fits **actual mrcal models**, compares a rich

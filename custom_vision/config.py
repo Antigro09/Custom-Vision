@@ -68,6 +68,10 @@ def validate_config(data, directory):
         if fourcc is not None and (not isinstance(fourcc,str) or len(fourcc)!=4 or not fourcc.isascii()):
             raise ValueError('camera.fourcc must be exactly four ASCII characters')
         finite(camera.get('capture_latency_offset_ms',0),'camera.capture_latency_offset_ms',0,100)
+        boolean(camera.setdefault('capture_correction_verified',False),'camera.capture_correction_verified')
+        uncertainty=camera.setdefault('capture_correction_uncertainty_ms',None)
+        if uncertainty is not None:
+            finite(uncertainty,'camera.capture_correction_uncertainty_ms',0,float('inf'))
         controls=mapping(camera.setdefault('controls',{}),'camera.controls')
         for key,value in controls.items():
             if not isinstance(key,str) or not key.replace('_','').isalnum():

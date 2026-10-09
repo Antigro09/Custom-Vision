@@ -73,6 +73,36 @@ def test_invalid_camera_settings_rejected_before_capture(tmp_path, camera):
         load_config(write_config(tmp_path, config))
 
 
+@pytest.mark.parametrize('metadata', [
+    {'capture_correction_verified': 1}, {'capture_correction_verified': 'false'},
+    {'capture_correction_uncertainty_ms': -1}, {'capture_correction_uncertainty_ms': True},
+    {'capture_correction_uncertainty_ms': float('nan')},
+    {'capture_correction_uncertainty_ms': float('inf')},
+])
+def test_capture_correction_metadata_rejects_invalid_values(tmp_path, metadata):
+    config = base_config()
+    config['pipelines'][0]['camera'].update(metadata)
+    with pytest.raises(ValueError, match='capture_correction'):
+        load_config(write_config(tmp_path, config))
+
+
+def test_capture_correction_verification_is_independent_of_numeric_offset(tmp_path):
+    config = base_config()
+    camera = load_config(write_config(tmp_path, config))['pipelines'][0]['camera']
+    assert camera['capture_correction_verified'] is False
+    assert camera['capture_correction_uncertainty_ms'] is None
+    config['pipelines'][0]['camera'].update(capture_latency_offset_ms=0,
+        capture_correction_verified=True, capture_correction_uncertainty_ms=0)
+    measured = load_config(write_config(tmp_path, config))['pipelines'][0]['camera']
+    assert measured['capture_correction_verified'] is True
+    assert measured['capture_correction_uncertainty_ms'] == 0
+    config['pipelines'][0]['camera'].update(capture_latency_offset_ms=12,
+        capture_correction_verified=False, capture_correction_uncertainty_ms=None)
+    unverified = load_config(write_config(tmp_path, config))['pipelines'][0]['camera']
+    assert unverified['capture_latency_offset_ms'] == 12
+    assert unverified['capture_correction_verified'] is False
+
+
 class RecordingPublisher:
     def __init__(self):
         self.payloads = []
@@ -193,13 +223,24 @@ def test_no_pose_execution_is_reported_when_not_run(monkeypatch, pipeline_type, 
 def test_error_clears_fps_pose_device_and_poi():
     runtime = fake_runtime()
     cfg = runtime.groups['0'][0][0]
-    runtime.emit(cfg, 3, time.monotonic(), [], error='Camera unavailable',
-                 extras={'fps': 55., 'pose_device': 'cuda', 'poi': {'valid': True}})
+    runtime.emit(cfg, 3, time.monotonic(), [{'id': 7}], error='Camera unavailable',
+                 extras={'fps': 55., 'pose_device': 'cuda', 'poi': {'valid': True},
+                         'detections': [{'id': 9}], 'connected': True, 'error': None,
+                         'localization': {'valid': True, 'field_to_robot': {'translation_m': [1, 2, 3]}},
+                         'objects': {'valid': True, 'targets': [{'track_id': 1}], 'selected_track_id': 1}})
     [payload] = runtime.publisher.payloads
     assert payload['fps'] == 0.
     assert payload['pose_device'] == 'none'
     assert payload['poi']['valid'] is False
     assert payload['poi']['targets'] == []
+    assert payload['connected'] is False and payload['error'] == 'Camera unavailable'
+    assert payload['detections'] == []
+    assert payload['localization']['valid'] is False
+    assert payload['localization']['field_to_robot'] is None
+    assert payload['localization']['field_to_camera'] is None
+    assert payload['objects']['valid'] is False
+    assert payload['objects']['targets'] == []
+    assert payload['objects']['selected_track_id'] is None
 
 
 def test_deferred_cuda_fallback_is_included_in_runtime_pose_provenance(monkeypatch):
@@ -441,16 +482,101 @@ def test_delayed_emit_cannot_revive_target_cleared_by_watchdog(monkeypatch):
         emitter.start()
         assert waiting.wait(1)
         clock[0] = 100.6
-        runtime.emit(cfg, 3, clock[0], [], error='No fresh frame within 500 ms')
+        runtime.emit(cfg, 3, 100., [], error='No fresh frame within 500 ms')
     emitter.join(timeout=1)
     assert not emitter.is_alive()
-    assert len(runtime.publisher.payloads) == 2
+    assert len(runtime.publisher.payloads) == 1
     for result in runtime.publisher.payloads:
         assert result['connected'] is False
         assert result['detections'] == []
-        assert 'localization' not in result
+        assert result['localization']['valid'] is False
     assert runtime.publisher.payloads[-1]['latency_ms'] == pytest.approx(600.)
-    assert runtime.publisher.payloads[-1]['error'] == 'Frame exceeded 500 ms age limit'
+    assert runtime.publisher.payloads[-1]['error'] == 'No fresh frame within 500 ms'
+
+
+def test_same_capture_cannot_revive_after_invalidation_even_if_clock_looks_fresh(monkeypatch):
+    runtime = fake_runtime()
+    cfg = runtime.config['pipelines'][0]
+    monkeypatch.setattr(app.time, 'monotonic', lambda: 100.)
+    runtime.emit(cfg, 0, 100., [{'id': 7}])
+    runtime.emit(cfg, 0, 100., [], error='No fresh frame within 500 ms')
+    runtime.emit(cfg, 0, 100., [{'id': 7}])
+    assert len(runtime.publisher.payloads) == 2
+    assert runtime.publisher.payloads[-1]['connected'] is False
+    assert runtime.states[cfg['name']]['failed'] is True
+
+
+def test_camera_error_then_new_capture_can_recover_at_same_frame_counter(monkeypatch):
+    runtime = fake_runtime()
+    cfg = runtime.config['pipelines'][0]
+    clock = [100.]
+    monkeypatch.setattr(app.time, 'monotonic', lambda: clock[0])
+    runtime.emit(cfg, 0, 100., [], error='Camera read failed')
+    clock[0] = 100.02
+    runtime.emit(cfg, 0, clock[0], [{'id': 7}])
+    assert len(runtime.publisher.payloads) == 2
+    assert runtime.publisher.payloads[-1]['connected'] is True
+    assert runtime.publisher.payloads[-1]['detections'] == [{'id': 7}]
+
+
+def test_reload_immediately_invalidates_and_shutdown_keeps_capture_identity(monkeypatch):
+    runtime = fake_runtime()
+    cfg = runtime.config['pipelines'][0]
+    clock = [100.]
+    monkeypatch.setattr(app.time, 'monotonic', lambda: clock[0])
+    runtime.emit(cfg, 4, 100., [{'id': 7}])
+    clock[0] = 100.2
+    runtime.request_restart()
+    reloading = runtime.publisher.payloads[-1]
+    assert runtime.restart_requested and runtime.stop.is_set()
+    assert reloading['error'] == 'Runtime reload requested'
+    assert reloading['frame_id'] == 4 and reloading['capture_monotonic_us'] == 100000000
+    assert reloading['detections'] == []
+    runtime.run()
+    shutdown = runtime.publisher.payloads[-1]
+    assert shutdown['error'] == 'Runtime stopped'
+    assert shutdown['frame_id'] == 4 and shutdown['capture_monotonic_us'] == 100000000
+    assert runtime.publisher.closed
+
+
+def test_runtime_preserves_full_precision_and_independent_timing_metadata(monkeypatch):
+    runtime = fake_runtime()
+    cfg = runtime.config['pipelines'][0]
+    cfg['camera'].update(capture_latency_offset_ms=0, capture_correction_verified=True,
+                         capture_correction_uncertainty_ms=0)
+    monkeypatch.setattr(app.time, 'monotonic', lambda: 100.)
+    detection = {'id': 7, 'tx_deg': 0.123456789}
+    runtime.emit(cfg, 0, 100., [detection], extras={'localization': {'valid': False},
+                 'poi': {'valid': True, 'targets': [{'camera_translation_m': [1.123456789, 0., 0.]}]}})
+    [payload] = runtime.publisher.payloads
+    assert payload['detections'][0]['tx_deg'] == 0.123456789
+    assert payload['poi']['valid'] is True and payload['localization']['valid'] is False
+    assert payload['poi']['targets'][0]['camera_translation_m'][0] == 1.123456789
+    assert payload['timing'] == {'clock_domain': 'nt_server', 'timestamp_unit': 'us',
+        'capture_event': 'host_frame_read_complete', 'capture_correction_verified': True,
+        'capture_correction_uncertainty_ms': 0}
+    assert payload['calibration_revision'] is None
+    assert payload['mount_revision'] is None
+    assert payload['field_layout_revision'] is None
+
+
+def test_new_runtime_changes_boot_and_revision_when_geometry_configuration_changes(monkeypatch):
+    monkeypatch.setattr(app, 'make_detector', lambda *_: FakeDetector())
+    config = base_config()
+    config.update(networktables={'enabled': False}, dashboard={'enabled': False})
+    config['pipelines'][0]['robot_to_camera'] = {
+        'translation_m': [0.2, 0., 0.3], 'rotation_rpy_deg': [0., 15., 0.]}
+    first = app.Runtime(copy.deepcopy(config))
+    config['pipelines'][0]['robot_to_camera']['translation_m'][0] = 0.21
+    second = app.Runtime(config)
+    try:
+        assert first.boot_id != second.boot_id
+        assert first.revisions['front_tags']['mount_revision'] != second.revisions['front_tags']['mount_revision']
+        assert first.revisions['front_tags']['calibration_revision'] is None
+        assert second.revisions['front_tags']['calibration_revision'] is None
+    finally:
+        first.publisher.close()
+        second.publisher.close()
 
 
 def payload(*, connected=True, detections=None):

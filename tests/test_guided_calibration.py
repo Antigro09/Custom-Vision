@@ -18,7 +18,7 @@ import pytest
 from custom_vision.calibration_session import (Board, Selector, Session, LiveReader, Analyzer,
                                                detect_board, grid_coverage, load_session, overlay, main, write_json)
 from custom_vision.calibration_mount import estimate_mount, validate_transform, rpy_degrees
-from custom_vision.calibration_solver import split_views, export_opencv, calibrate
+from custom_vision.calibration_solver import split_views, export_opencv, calibrate, board_poses
 from custom_vision.localization import CV_TO_NWU, _rpy_rotation
 
 
@@ -253,6 +253,49 @@ def test_spline_cannot_be_silently_exported_as_opencv():
     model = SimpleNamespace(intrinsics=lambda: ('LENSMODEL_SPLINED_STEREOGRAPHIC', np.zeros(40)))
     with pytest.raises(ValueError, match='exact'):
         export_opencv(None, model, {})
+
+
+@pytest.mark.parametrize('pose_key', ['rt_ref_frame', 'frames_rt_toref'])
+def test_board_poses_supports_native_field_names_and_preserves_direction(pose_key):
+    # Reordered frame mapping and selected views must retain their identities.
+    frames = np.array([[0., 0., np.pi / 2, .1, -.2, .7], [0., 0., 0., -.3, .4, .8]])
+    inputs = {pose_key: frames, 'indices_frame_camintrinsics_camextrinsics': np.array([[1, 0, -1], [0, 0, -1]])}
+    if pose_key == 'rt_ref_frame':
+        inputs['frames_rt_toref'] = 'ERROR: mrcal 2.5 renamed this field'
+    result = board_poses(SimpleNamespace(optimization_inputs=lambda: inputs), [2, 0],
+                         [{'image': 'first.png'}, {'image': 'unused.png'}, {'image': 'third.png'}])
+    assert [p['image'] for p in result['poses']] == ['third.png', 'first.png']
+    transform = np.asarray(result['poses'][1]['camera_cv_T_board'])
+    np.testing.assert_allclose(transform @ [.2, 0., 0., 1.], [.1, 0., .7, 1.], atol=1e-12)
+    np.testing.assert_allclose(np.asarray(result['poses'][0]['camera_cv_T_board'])[:3, 3], [-.3, .4, .8])
+    assert result['robot_to_camera'] is None
+    assert 'p_camera_cv = R @ p_board + t' in result['convention']
+    assert 'NOT robot mount' in result['warning']
+
+
+@pytest.mark.parametrize('frames', [np.zeros(6), np.zeros((1, 5)), np.zeros((1, 7)),
+                                   np.zeros((0, 6)), np.full((1, 6), np.nan), np.full((1, 6), np.inf),
+                                   'ERROR: old key is deliberately poisoned'])
+def test_board_poses_rejects_invalid_native_pose_arrays(frames):
+    inputs = {'rt_ref_frame': frames, 'frames_rt_toref': np.zeros((1, 6)),
+              'indices_frame_camintrinsics_camextrinsics': np.array([[0, 0, -1]])}
+    # A malformed new field must not silently fall back to a valid legacy field.
+    with pytest.raises(ValueError, match='board poses|Board poses'):
+        board_poses(SimpleNamespace(optimization_inputs=lambda: inputs), [0], [{'image': 'frame.png'}])
+
+
+@pytest.mark.parametrize('mapping, indices', [
+    (np.array([0, 0, -1]), [0]), (np.zeros((1, 2), int), [0]), (np.empty((0, 3), int), [0]),
+    (np.array([[0., 0., -1.]]), [0]), (np.array([[np.nan, 0., -1.]]), [0]),
+    (np.array([[-1, 0, -1]]), [0]), (np.array([[1, 0, -1]]), [0]),
+    (np.array([[0, 1, -1]]), [0]), (np.array([[0, 0, 0]]), [0]),
+    (np.array([[0, 0, -1]]), [-1]), (np.array([[0, 0, -1]]), [1]),
+    (np.array([[0, 0, -1]]), [.0]), (np.array([[0, 0, -1]]), [False]),
+])
+def test_board_poses_rejects_invalid_indices_without_mislabeling(mapping, indices):
+    inputs = {'rt_ref_frame': np.zeros((1, 6)), 'indices_frame_camintrinsics_camextrinsics': mapping}
+    with pytest.raises(ValueError):
+        board_poses(SimpleNamespace(optimization_inputs=lambda: inputs), indices, [{'image': 'frame.png'}])
 
 
 def mrcal_available():

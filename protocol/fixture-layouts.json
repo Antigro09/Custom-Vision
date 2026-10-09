@@ -1,0 +1,93 @@
+{
+  "description": "Literal normalized synthetic configuration inputs used for portable corpus regeneration; not surveyed or measured field geometry.",
+  "layouts": {
+    "scene": {
+      "field": {
+        "length": 16.5,
+        "width": 8.2
+      },
+      "tags": [
+        {
+          "ID": 1,
+          "pose": {
+            "translation": {
+              "x": 5.0,
+              "y": 3.3,
+              "z": 1.3
+            },
+            "rotation": {
+              "quaternion": {
+                "W": 6.123233995736766e-17,
+                "X": 0.0,
+                "Y": -0.0,
+                "Z": 1.0
+              }
+            }
+          }
+        },
+        {
+          "ID": 2,
+          "pose": {
+            "translation": {
+              "x": 5.4,
+              "y": 4.4,
+              "z": 0.8
+            },
+            "rotation": {
+              "quaternion": {
+                "W": 0.17364817766693025,
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": -0.9848077530122081
+              }
+            }
+          }
+        },
+        {
+          "ID": 3,
+          "pose": {
+            "translation": {
+              "x": 4.8,
+              "y": 2.6,
+              "z": 0.9
+            },
+            "rotation": {
+              "quaternion": {
+                "W": 0.17364817766693044,
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.9848077530122081
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ambiguous": {
+      "field": {
+        "length": 16.5,
+        "width": 8.2
+      },
+      "tags": [
+        {
+          "ID": 7,
+          "pose": {
+            "translation": {
+              "x": 3.0,
+              "y": 2.0,
+              "z": 1.0
+            },
+            "rotation": {
+              "quaternion": {
+                "W": 6.123233995736766e-17,
+                "X": 0.0,
+                "Y": -0.0,
+                "Z": 1.0
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

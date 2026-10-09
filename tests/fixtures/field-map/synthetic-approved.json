@@ -1,0 +1,188 @@
+{
+  "schema_version": "frc-field-map/1",
+  "map": {
+    "id": "synthetic-shared-8x4",
+    "revision": 1,
+    "season": null,
+    "variant": "synthetic-fixture",
+    "frame": "wpilib_nwu",
+    "units": "m",
+    "width_m": 8,
+    "height_m": 4
+  },
+  "image": {
+    "file_name": "synthetic-top-down.png",
+    "sha256": "9f8ad23da16dcf864327ca31558ad9e1cae8864a8355e9c2f9feba48a828ebeb",
+    "width_px": 400,
+    "height_px": 200,
+    "mime_type": "image/png",
+    "attribution": "Locally generated synthetic test diagram",
+    "license": "CC0-1.0"
+  },
+  "source": {
+    "kind": "synthetic",
+    "label": "SYNTHETIC TEST DIAGRAM — not verified field geometry",
+    "uri": null
+  },
+  "calibration": {
+    "model": "affine",
+    "image_to_field": [
+      0.02,
+      0,
+      0,
+      0,
+      -0.02,
+      4,
+      0,
+      0,
+      1
+    ],
+    "control_points": [
+      {
+        "pixel": [
+          0,
+          200
+        ],
+        "field_m": [
+          0,
+          0
+        ]
+      },
+      {
+        "pixel": [
+          400,
+          200
+        ],
+        "field_m": [
+          8,
+          0
+        ]
+      },
+      {
+        "pixel": [
+          0,
+          0
+        ],
+        "field_m": [
+          0,
+          4
+        ]
+      }
+    ],
+    "distortion": "not_applicable",
+    "fit_error_m": 0,
+    "independent_check_error_m": 0,
+    "independent_check_points": [
+      {
+        "pixel": [
+          200,
+          100
+        ],
+        "field_m": [
+          4,
+          2
+        ]
+      }
+    ]
+  },
+  "boundary": {
+    "outer": [
+      [
+        0,
+        0
+      ],
+      [
+        8,
+        0
+      ],
+      [
+        8,
+        4
+      ],
+      [
+        0,
+        4
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "holes": [],
+    "review": {
+      "state": "approved",
+      "reviewed_revision": 1
+    },
+    "provenance": {
+      "kind": "manual",
+      "label": "Synthetic fixture coordinates; not an FRC field",
+      "uri": null
+    }
+  },
+  "obstacles": [
+    {
+      "id": "synthetic-ring",
+      "outer": [
+        [
+          3,
+          1
+        ],
+        [
+          5,
+          1
+        ],
+        [
+          5,
+          3
+        ],
+        [
+          3,
+          3
+        ],
+        [
+          3,
+          1
+        ]
+      ],
+      "holes": [
+        [
+          [
+            3.5,
+            1.5
+          ],
+          [
+            3.5,
+            2.5
+          ],
+          [
+            4.5,
+            2.5
+          ],
+          [
+            4.5,
+            1.5
+          ],
+          [
+            3.5,
+            1.5
+          ]
+        ]
+      ],
+      "review": {
+        "state": "approved",
+        "reviewed_revision": 1
+      },
+      "provenance": {
+        "kind": "manual",
+        "label": "Synthetic fixture coordinates; not an FRC field",
+        "uri": null
+      },
+      "vertical_range_m": null
+    }
+  ],
+  "approval": {
+    "state": "approved",
+    "reviewed_revision": 1,
+    "content_sha256": "e022b3c0b20e83f71f8a6519946d635bc2e730c38d20f65392dae404d76f0163"
+  }
+}

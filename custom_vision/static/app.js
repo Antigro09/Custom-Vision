@@ -156,6 +156,7 @@ function populatePipeline() {
   $('nt-description').textContent = nt.enabled ? `Team ${nt.team || '—'} · ${nt.server || 'Automatic roboRIO discovery'} · ${nt.table || '/CustomVision'}` : 'NetworkTables publication is disabled in the saved configuration.';
   for (const button of $('pipelines').children) button.classList.toggle('selected', button.dataset.name === pipeline.name);
   updateStatus();
+  globalThis.CVFieldDashboard?.selectPipeline(pipeline.name);
 }
 function buildNav() {
   $('pipelines').replaceChildren();
@@ -173,7 +174,7 @@ async function loadConfiguration() {
   state.devices = devices.devices || [];
   if (!selectedPipeline()) state.selected = state.config.pipelines?.[0]?.name;
   buildNav(); populatePipeline(); setBusy(false);
-  if (!state.writable) notice('This dashboard is read-only. Start the runtime with a configuration controller to enable setup.');
+  if (!state.writable) notice(state.config.dashboard?.preview_notice || 'This dashboard is read-only. Start the runtime with a configuration controller to enable setup.');
   $('connection').textContent = 'Connected'; $('connection').className = 'badge live';
 }
 function collectSettings() {
@@ -320,8 +321,14 @@ function updateStatus() {
   if (!connected) hideFrame();
 }
 async function pollStatus() {
-  try { state.status = await request('/api/status'); $('connection').textContent = 'Connected'; $('connection').className = 'badge live'; updateStatus(); }
-  catch (_) { $('connection').textContent = 'Unavailable'; $('connection').className = 'badge error'; state.status = {}; updateStatus(); }
+  try {
+    const field = globalThis.CVFieldDashboard;
+    const view = await request(field ? '/api/field-view' : '/api/status');
+    state.status = field ? (view.results || {}) : view;
+    field?.updateLive(view);
+    $('connection').textContent = 'Connected'; $('connection').className = 'badge live'; updateStatus();
+  }
+  catch (_) { $('connection').textContent = 'Unavailable'; $('connection').className = 'badge error'; state.status = {}; globalThis.CVFieldDashboard?.markDisconnected(); updateStatus(); }
   finally { setTimeout(pollStatus, document.hidden ? 2000 : 500); }
 }
 async function pollPreview() {

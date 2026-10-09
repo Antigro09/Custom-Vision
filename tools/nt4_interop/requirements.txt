@@ -1,0 +1,2 @@
+# Isolated test producer; do not apply this file to the installed Jetson stack.
+pyntcore==2024.3.2.1
